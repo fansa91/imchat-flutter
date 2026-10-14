@@ -283,6 +283,7 @@ class ComposerState extends State<Composer> {
         onPointerCancel: (_) => _finishRecording(false),
         child: Tooltip(
           message: isDesktop ? '点击开始录音' : '按住说话，或轻点录音',
+          triggerMode: TooltipTriggerMode.manual,
           child: AnimatedContainer(
             duration: const Duration(milliseconds: 150),
             width: rec != null ? 56 : 48,

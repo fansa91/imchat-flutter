@@ -129,15 +129,20 @@ class MessageItem extends StatelessWidget {
       ),
     );
 
-    final interactive = GestureDetector(
-      onLongPress: () {
-        HapticFeedback.selectionClick();
-        onMenu(m);
-      },
-      onSecondaryTap: () => onMenu(m),
-      child: Tooltip(
-        message: hm(m.createdAt),
-        waitDuration: const Duration(milliseconds: 800),
+    // 注意：Tooltip 在触屏上默认用长按触发，且位于内层时会在手势竞争中抢走长按，
+    // 导致消息菜单（回复/复制/撤回/删除）弹不出来。这里改为 manual（仅桌面悬停显示），
+    // 并把手势放在内层，确保长按/右键稳定触发菜单。
+    final interactive = Tooltip(
+      message: hm(m.createdAt),
+      triggerMode: TooltipTriggerMode.manual,
+      waitDuration: const Duration(milliseconds: 800),
+      child: GestureDetector(
+        behavior: HitTestBehavior.opaque,
+        onLongPress: () {
+          HapticFeedback.selectionClick();
+          onMenu(m);
+        },
+        onSecondaryTap: () => onMenu(m),
         child: bubble,
       ),
     );
