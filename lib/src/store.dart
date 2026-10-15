@@ -3,9 +3,13 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart';
+import 'package:path/path.dart' as pathlib;
+import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import 'api.dart';
+import 'image_cache.dart';
+import 'image_prep.dart';
 import 'models.dart';
 import 'recorder.dart';
 import 'settings.dart';
@@ -28,8 +32,10 @@ class Thread {
   int modSeq = 0;
 }
 
-/// 语音本地状态：loading 下载中 / ready 本地有 / expired 服务器已过期且本地没有 / error
+/// 语音 / 图片本地状态：loading 下载中 / ready 本地有 / expired 服务器已过期且本地没有 / error
 enum VoiceState { loading, ready, expired, error }
+
+typedef MediaState = VoiceState;
 
 class TypingInfo {
   final int uid;
@@ -39,6 +45,18 @@ class TypingInfo {
 }
 
 const int _page = 50;
+
+/// 转文字失败的提示文案
+String transcribeError(Object e) {
+  if (e is ApiError) {
+    if (e.code == 'stt_limit' || e.status == 429) return '今日转文字次数已用完';
+    if (e.code == 'stt_disabled' || e.status == 501) return '服务器未开启语音转文字';
+    if (e.code == 'recalled' || e.status == 410) return '消息已撤回';
+    if (e.code == 'stt_failed' || e.status == 502) return '转文字失败，请稍后再试';
+    return e.message;
+  }
+  return '转文字失败';
+}
 const Duration _sendTimeout = Duration(seconds: 10);
 
 /// 全局状态与业务逻辑（移植自 imweb/src/store.ts，协议保持一致）
@@ -75,6 +93,7 @@ class ChatStore extends ChangeNotifier {
       final m = _m(d);
       _onDeleted(_i(m['conversation_id']), ((m['seqs'] as List?) ?? const []).map(_i).toList());
     });
+    socket.on('presence', (d, _) => _onPresence(Presence.fromJson(_m(d))));
     socket.on('conversation_updated', (d, _) => refreshConversation(_i(_m(d)['conversation_id'])));
     socket.on('conversation_removed', (d, _) => _dropConversation(_i(_m(d)['conversation_id'])));
     socket.on('error', (d, id) {
@@ -94,6 +113,7 @@ class ChatStore extends ChangeNotifier {
   final Api api;
   late final ChatSocket socket;
   VoiceCache? _cache;
+  ImageFileCache? _imgCache;
 
   User? me;
   bool booting = true;
@@ -117,6 +137,18 @@ class ChatStore extends ChangeNotifier {
   /// voiceKey -> 状态
   final Map<String, VoiceState> voice = {};
 
+  /// imageKey（会话:seq）-> 状态
+  final Map<String, MediaState> images = {};
+
+  /// 用户 -> 在线状态（presence_enabled 时）
+  final Map<int, Presence> presence = {};
+
+  /// 语音转文字：会话:seq -> 文本（内存，持久化在 Settings）
+  final Map<String, String> transcripts = {};
+
+  /// 正在转写的语音（会话:seq）
+  final Set<String> transcribing = {};
+
   final _toasts = StreamController<String>.broadcast();
   Stream<String> get toasts => _toasts.stream;
 
@@ -124,7 +156,10 @@ class ChatStore extends ChangeNotifier {
 
   /// 本地语音文件：发送中的按 client_msg_id，已确认的按 voiceKey
   final Map<String, File> _localVoice = {};
-  final List<(int, int)> _downloadQueue = [];
+
+  /// 本地图片文件：发送中的按 client_msg_id，已确认的按 imageKey
+  final Map<String, File> _localImage = {};
+  final List<(int, int, bool)> _downloadQueue = [];
   int _downloading = 0;
 
   /// 自己撤回的文本，用于“重新编辑”
@@ -189,10 +224,12 @@ class ChatStore extends ChangeNotifier {
 
   Future<void> _afterLogin() async {
     _cache = await VoiceCache.open(settings.server);
+    _imgCache = await ImageFileCache.open(settings.server);
     socket.start();
     api.config().then((c) {
       config = c;
       _notify();
+      refreshPresence();
     }).catchError((_) {});
     loadConversations().catchError((_) => <Conversation>[]);
   }
@@ -217,6 +254,7 @@ class ChatStore extends ChangeNotifier {
     }
     _timers.clear();
     _localVoice.clear();
+    _localImage.clear();
     _downloadQueue.clear();
     me = null;
     conn = ConnState.offline;
@@ -228,6 +266,10 @@ class ChatStore extends ChangeNotifier {
     users.clear();
     members.clear();
     voice.clear();
+    images.clear();
+    presence.clear();
+    transcripts.clear();
+    transcribing.clear();
     recalledDrafts.clear();
     activeId = null;
   }
@@ -319,6 +361,7 @@ class ChatStore extends ChangeNotifier {
   Future<void> _sync() async {
     try {
       await loadConversations();
+      refreshPresence();
       for (final id in threads.keys.toList()) {
         final t = threads[id];
         if (t == null || !t.loaded) continue;
@@ -334,7 +377,7 @@ class ChatStore extends ChangeNotifier {
       for (final t in threads.values) {
         for (final m in t.pending.toList()) {
           if (m.status == MsgStatus.sending) {
-            if (m.msgType == msgVoice) {
+            if (m.msgType == msgVoice || m.msgType == msgImage) {
               _uploadAndSend(m);
             } else {
               _transmit(m);
@@ -426,6 +469,7 @@ class ChatStore extends ChangeNotifier {
       _addUsers(list.map((m) => m.user));
       members[id] = list;
       _notify();
+      refreshPresence(list.map((m) => m.user.id).where((u) => !presence.containsKey(u)));
       return list;
     } catch (_) {
       return const [];
@@ -566,6 +610,7 @@ class ChatStore extends ChangeNotifier {
     }
     for (final m in msgs) {
       if (m.msgType == msgVoice && !m.recalled) _ensureVoice(m);
+      if (m.msgType == msgImage && !m.recalled) _ensureImage(m);
     }
     _notify();
   }
@@ -581,7 +626,7 @@ class ChatStore extends ChangeNotifier {
       convs[id] = c.copyWith(lastMessage: by[c.lastMessage!.seq]);
     }
     for (final m in msgs) {
-      if (m.recalled) _forgetVoice(id, m.seq);
+      if (m.recalled) _forgetMedia(id, m.seq);
     }
     _notify();
   }
@@ -614,7 +659,8 @@ class ChatStore extends ChangeNotifier {
     final items = threads[id]?.items ?? const <Message>[];
     final o = items.where((m) => m.seq == seq).firstOrNull;
     if (o == null) return null;
-    final preview = o.msgType == msgText ? (o.content.length > 80 ? o.content.substring(0, 80) : o.content) : '[语音]';
+    final sp = shortPreview(o);
+    final preview = sp.length > 80 ? sp.substring(0, 80) : sp;
     return ReplyPreview(seq: seq, senderId: o.senderId, msgType: o.msgType, preview: preview, recalled: o.recalled);
   }
 
@@ -641,7 +687,38 @@ class ChatStore extends ChangeNotifier {
     _notify();
   }
 
+  /// 图片：压缩后先占位显示（本地文件），上传后再通过 WebSocket 发送
+  Future<void> sendImage(int id, Uint8List raw, {int? replyToSeq}) async {
+    if (me == null) return;
+    PreparedImage img;
+    try {
+      img = await prepareImage(raw);
+    } catch (e) {
+      showToast(e is ImagePrepException ? e.message : '无法处理这张图片');
+      return;
+    }
+    final maxBytes = config.imageMaxBytes ?? 10485760;
+    if (img.bytes.length > maxBytes) {
+      showToast('图片不能超过 ${(maxBytes / 1048576).toStringAsFixed(maxBytes % 1048576 == 0 ? 0 : 1)} MB');
+      return;
+    }
+    File file;
+    try {
+      final dir = await getTemporaryDirectory();
+      file = File(pathlib.join(dir.path, 'imchat_${_uuid.v4()}.${ImageFileCache.extFor(img.mime)}'));
+      await file.writeAsBytes(img.bytes, flush: true);
+    } catch (e) {
+      showToast('无法保存临时图片');
+      return;
+    }
+    final local = ImageContent(key: '', mime: img.mime, size: img.bytes.length, width: img.width, height: img.height);
+    final m = _addPending(id, msgImage, local.encode(), replyToSeq);
+    _localImage[m.clientMsgId] = file;
+    await _uploadAndSend(m);
+  }
+
   Future<void> _uploadAndSend(Message m) async {
+    if (m.msgType == msgImage) return _uploadImageAndSend(m);
     final file = _localVoice[m.clientMsgId];
     final vc = VoiceContent.of(m);
     if (vc == null) return _failPending(m.clientMsgId);
@@ -663,10 +740,32 @@ class ChatStore extends ChangeNotifier {
     _transmit(cur);
   }
 
+  Future<void> _uploadImageAndSend(Message m) async {
+    final file = _localImage[m.clientMsgId];
+    final ic = ImageContent.of(m);
+    if (ic == null) return _failPending(m.clientMsgId);
+    var cur = m;
+    if (ic.key.isEmpty) {
+      if (file == null || !await file.exists()) return _failPending(m.clientMsgId);
+      try {
+        final bytes = await file.readAsBytes();
+        final pre = await api.presignImage(mime: ic.mime, size: bytes.length, width: ic.width, height: ic.height);
+        await api.upload(pre, bytes);
+        final content = ic.withKey(pre.key).encode();
+        cur = m.copyWith(content: content);
+        _updatePending(m.clientMsgId, (p) => p.copyWith(content: content));
+      } catch (e) {
+        showToast(e is ApiError ? e.message : '图片上传失败');
+        return _failPending(m.clientMsgId);
+      }
+    }
+    _transmit(cur);
+  }
+
   void retry(Message m) {
     _updatePending(m.clientMsgId, (p) => p.copyWith(status: MsgStatus.sending));
     final cur = threads[m.conversationId]?.pending.where((p) => p.clientMsgId == m.clientMsgId).firstOrNull ?? m;
-    if (cur.msgType == msgVoice) {
+    if (cur.msgType == msgVoice || cur.msgType == msgImage) {
       _uploadAndSend(cur);
     } else {
       _transmit(cur);
@@ -677,6 +776,7 @@ class ChatStore extends ChangeNotifier {
   void _transmit(Message m) {
     _timers.remove(m.clientMsgId)?.cancel();
     if (m.msgType == msgVoice && (VoiceContent.of(m)?.key ?? '').isEmpty) return; // 还没上传完
+    if (m.msgType == msgImage && (ImageContent.of(m)?.key ?? '').isEmpty) return;
     final ok = socket.send(
       'send',
       {
@@ -702,6 +802,8 @@ class ChatStore extends ChangeNotifier {
     _timers.remove(m.clientMsgId)?.cancel();
     final f = _localVoice.remove(m.clientMsgId);
     if (f != null) f.delete().catchError((_) => f);
+    final fi = _localImage.remove(m.clientMsgId);
+    if (fi != null) fi.delete().catchError((_) => fi);
     final t = threads[m.conversationId];
     if (t != null) t.pending = t.pending.where((p) => p.clientMsgId != m.clientMsgId).toList();
     _notify();
@@ -722,6 +824,20 @@ class ChatStore extends ChangeNotifier {
         debugPrint('save voice: $e');
       }
     }
+    // 自己发的图片：压缩后的本地文件直接存入缓存
+    // 待发送条目在确认前仍在显示，先移入缓存再移除临时引用，避免占位闪烁
+    final fi = _localImage[m.clientMsgId];
+    if (fi != null && m.msgType == msgImage && _imgCache != null) {
+      final k = ImageFileCache.key(m.conversationId, m.seq);
+      try {
+        final mime = ImageContent.of(m)?.mime ?? 'image/jpeg';
+        _localImage[k] = await _imgCache!.adopt(m.conversationId, m.seq, mime, fi);
+        images[k] = MediaState.ready;
+      } catch (e) {
+        debugPrint('save image: $e');
+      }
+    }
+    _localImage.remove(m.clientMsgId);
     _ingest(m, true);
   }
 
@@ -771,6 +887,7 @@ class ChatStore extends ChangeNotifier {
         );
       }
       if (m.msgType == msgVoice) _ensureVoice(m); // 收到即下载，保证过期后仍能播放
+      if (m.msgType == msgImage && !m.recalled) _ensureImage(m);
     }
     if (mine) {
       final c = convs[id];
@@ -841,7 +958,7 @@ class ChatStore extends ChangeNotifier {
     } else {
       final c = convs[id];
       if (c?.lastMessage?.seq == m.seq) convs[id] = c!.copyWith(lastMessage: m);
-      _forgetVoice(id, m.seq);
+      _forgetMedia(id, m.seq);
     }
     // 引用了这条消息的回复也要更新预览
     if (t != null && t.loaded) {
@@ -897,7 +1014,7 @@ class ChatStore extends ChangeNotifier {
       }
     }
     for (final s in seqs) {
-      _forgetVoice(cid, s);
+      _forgetMedia(cid, s);
     }
     _notify();
   }
@@ -918,16 +1035,16 @@ class ChatStore extends ChangeNotifier {
       _notify();
       return;
     }
-    _downloadQueue.add((m.conversationId, m.seq));
+    _downloadQueue.add((m.conversationId, m.seq, false));
     _notify();
     _pump();
   }
 
   void _pump() {
     while (_downloading < 3 && _downloadQueue.isNotEmpty) {
-      final (cid, seq) = _downloadQueue.removeAt(0);
+      final (cid, seq, isImage) = _downloadQueue.removeAt(0);
       _downloading++;
-      _download(cid, seq).whenComplete(() {
+      (isImage ? _downloadImage(cid, seq) : _download(cid, seq)).whenComplete(() {
         _downloading--;
         _pump();
       });
@@ -983,11 +1100,184 @@ class ChatStore extends ChangeNotifier {
     return null;
   }
 
-  void _forgetVoice(int cid, int seq) {
+  /// 撤回 / 删除：清理语音、图片、转写结果的本地副本
+  void _forgetMedia(int cid, int seq) {
     final k = VoiceCache.key(cid, seq);
     _localVoice.remove(k);
     voice.remove(k);
     _cache?.delete(cid, seq);
+    final ik = ImageFileCache.key(cid, seq);
+    _localImage.remove(ik);
+    images.remove(ik);
+    _imgCache?.delete(cid, seq);
+    if (transcripts.remove(k) != null || settings.transcript(cid, seq) != null) {
+      settings.removeTranscript(cid, seq);
+    }
+    transcribing.remove(k);
+  }
+
+  // ---------- 图片本地缓存 ----------
+
+  String imageKeyOf(Message m) => ImageFileCache.key(m.conversationId, m.seq);
+
+  Future<void> _ensureImage(Message m) async {
+    final k = imageKeyOf(m);
+    if (images[k] == MediaState.ready || images[k] == MediaState.loading) return;
+    images[k] = MediaState.loading;
+    final f = await _imgCache?.find(m.conversationId, m.seq);
+    if (f != null) {
+      images[k] = MediaState.ready;
+      _localImage[k] = f;
+      _notify();
+      return;
+    }
+    _downloadQueue.add((m.conversationId, m.seq, true));
+    _notify();
+    _pump();
+  }
+
+  Future<void> _downloadImage(int cid, int seq) async {
+    final k = ImageFileCache.key(cid, seq);
+    var state = MediaState.error;
+    try {
+      final info = await api.media(cid, seq);
+      final (status, bytes) = await api.download(info.url);
+      if (status == 404 || status == 403) {
+        state = MediaState.expired;
+      } else if (status < 200 || status >= 300) {
+        throw Exception('HTTP $status');
+      } else if (_imgCache != null) {
+        _localImage[k] = await _imgCache!.put(cid, seq, info.mime, bytes);
+        state = MediaState.ready;
+      }
+    } catch (e) {
+      if (e is ApiError && (e.status == 410 || e.status == 404)) {
+        state = MediaState.expired;
+      } else {
+        debugPrint('image download failed: $e');
+      }
+    }
+    if (images[k] == null) {
+      await _imgCache?.delete(cid, seq);
+      _localImage.remove(k);
+      return;
+    }
+    images[k] = state;
+    _notify();
+  }
+
+  /// 气泡出现时调用：已确认的图片确保在本地
+  void ensureImage(Message m) {
+    if (m.seq == 0 || m.msgType != msgImage || m.recalled) return;
+    if (images.containsKey(imageKeyOf(m))) return;
+    Future.microtask(() => _ensureImage(m));
+  }
+
+  void retryImage(Message m) {
+    images.remove(imageKeyOf(m));
+    _ensureImage(m);
+  }
+
+  MediaState? imageState(Message m) => m.seq == 0 ? MediaState.ready : images[imageKeyOf(m)];
+
+  /// 显示用的本地文件：发送中的用压缩后的临时文件，已确认的用缓存
+  File? imageFileSync(Message m) => _localImage[m.seq > 0 ? imageKeyOf(m) : m.clientMsgId];
+
+  Future<File?> imageFile(Message m) async {
+    final k = m.seq > 0 ? imageKeyOf(m) : m.clientMsgId;
+    final f = _localImage[k];
+    if (f != null && await f.exists()) return f;
+    if (m.seq > 0) {
+      final c = await _imgCache?.find(m.conversationId, m.seq);
+      if (c != null) _localImage[k] = c;
+      return c;
+    }
+    return null;
+  }
+
+  // ---------- 在线状态 ----------
+
+  /// 批量拉取在线状态；不传 ids 时取所有会话的已知成员
+  Future<void> refreshPresence([Iterable<int>? ids]) async {
+    if (!config.presenceEnabled || me == null) return;
+    final all = <int>{};
+    if (ids != null) {
+      all.addAll(ids);
+    } else {
+      for (final c in convs.values) {
+        if (c.peer != null) all.add(c.peer!.id);
+        all.addAll(c.membersPreview.map((u) => u.id));
+      }
+      for (final list in members.values) {
+        all.addAll(list.map((m) => m.user.id));
+      }
+    }
+    all.removeWhere((u) => u == 0 || u == me?.id);
+    final list = all.toList();
+    for (var i = 0; i < list.length; i += 200) {
+      try {
+        final res = await api.presence(list.sublist(i, min(i + 200, list.length)));
+        for (final p in res) {
+          presence[p.userId] = p;
+        }
+      } catch (e) {
+        debugPrint('presence failed: $e');
+        return;
+      }
+    }
+    if (list.isNotEmpty) _notify();
+  }
+
+  void _onPresence(Presence p) {
+    if (p.userId == 0) return;
+    presence[p.userId] = p;
+    _notify();
+  }
+
+  bool isOnline(int uid) => config.presenceEnabled && (uid == me?.id || (presence[uid]?.online ?? false));
+
+  /// 群聊在线人数（含自己）；成员未加载时返回 null
+  int? onlineCount(int cid) {
+    final list = members[cid];
+    if (list == null) return null;
+    return list.where((m) => isOnline(m.user.id)).length;
+  }
+
+  // ---------- 语音转文字 ----------
+
+  String? transcriptOf(Message m) {
+    if (m.seq == 0) return null;
+    final k = VoiceCache.key(m.conversationId, m.seq);
+    final t = transcripts[k];
+    if (t != null) return t;
+    final saved = settings.transcript(m.conversationId, m.seq);
+    if (saved != null) transcripts[k] = saved;
+    return saved;
+  }
+
+  bool isTranscribing(Message m) => transcribing.contains(VoiceCache.key(m.conversationId, m.seq));
+
+  bool canTranscribe(Message m) =>
+      config.sttEnabled && m.msgType == msgVoice && m.seq > 0 && !m.recalled && transcriptOf(m) == null && !isTranscribing(m);
+
+  Future<void> transcribe(Message m) async {
+    if (m.seq == 0 || m.msgType != msgVoice) return;
+    final k = VoiceCache.key(m.conversationId, m.seq);
+    if (transcribing.contains(k)) return;
+    transcribing.add(k);
+    _notify();
+    try {
+      final r = await api.transcribe(m.conversationId, m.seq);
+      if (!transcribing.contains(k)) return; // 期间被撤回 / 删除
+      final text = r.text.trim().isEmpty ? '（未识别到内容）' : r.text.trim();
+      transcripts[k] = text;
+      await settings.saveTranscript(m.conversationId, m.seq, text);
+    } catch (e) {
+      showToast(transcribeError(e));
+    } finally {
+      transcribing.remove(k);
+      _notify();
+    }
   }
 
   // ---------- 视图辅助 ----------

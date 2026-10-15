@@ -6,6 +6,7 @@ import '../models.dart';
 import '../store.dart';
 import '../util.dart';
 import 'avatar.dart';
+import 'image_bubble.dart';
 import 'voice_bubble.dart';
 
 class MessageItem extends StatelessWidget {
@@ -66,16 +67,15 @@ class MessageItem extends StatelessWidget {
     final origRecalled = replyOrig != null ? replyOrig!.recalled : (reply?.recalled ?? false);
     String? origPreview = reply?.preview;
     if (replyOrig != null) {
-      origPreview = replyOrig!.msgType == msgText
-          ? replyOrig!.content
-          : replyOrig!.msgType == msgVoice
-              ? '[语音]'
-              : '[消息]';
+      origPreview = shortPreview(replyOrig!);
     }
 
     Widget content;
+    final isImage = m.msgType == msgImage;
     if (m.msgType == msgVoice) {
       content = VoiceBubble(m: m, mine: mine);
+    } else if (isImage) {
+      content = ImageBubble(m: m, mine: mine);
     } else if (m.msgType == msgText) {
       content = Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
@@ -84,7 +84,7 @@ class MessageItem extends StatelessWidget {
     } else {
       content = Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
-        child: Text('[暂不支持的消息类型]', style: tt.bodyLarge?.copyWith(color: fg)),
+        child: Text(unsupportedText, style: tt.bodyLarge?.copyWith(color: fg.withValues(alpha: 0.8))),
       );
     }
 
@@ -92,6 +92,7 @@ class MessageItem extends StatelessWidget {
       opacity: m.status == MsgStatus.sending ? 0.7 : 1,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
+        clipBehavior: isImage ? Clip.antiAlias : Clip.none,
         decoration: BoxDecoration(
           color: highlighted ? cs.tertiary : bubbleColor,
           borderRadius: radius,
@@ -175,6 +176,7 @@ class MessageItem extends StatelessWidget {
                     child: Text(store.nameOf(m.senderId), style: tt.labelSmall?.copyWith(color: cs.onSurfaceVariant)),
                   ),
                 interactive,
+                if (m.msgType == msgVoice) _Transcript(m: m),
                 if (m.reactions.isNotEmpty) _Reactions(m: m, meId: meId),
               ],
             ),
@@ -206,6 +208,46 @@ class _HoverMore extends StatelessWidget {
       tooltip: '回应 / 更多',
       icon: Icon(Icons.add_reaction_outlined, color: Theme.of(context).colorScheme.outline),
       onPressed: onTap,
+    );
+  }
+}
+
+/// 语音转文字结果（气泡下方的小文字块，可复制）。
+/// 不用 SelectableText：它的长按选择手势会抢走消息菜单的长按。
+class _Transcript extends StatelessWidget {
+  const _Transcript({required this.m});
+  final Message m;
+  @override
+  Widget build(BuildContext context) {
+    final store = context.read<ChatStore>();
+    final text = store.transcriptOf(m);
+    final busy = store.isTranscribing(m);
+    if (text == null && !busy) return const SizedBox.shrink();
+    final cs = Theme.of(context).colorScheme;
+    final tt = Theme.of(context).textTheme;
+    return Container(
+      margin: const EdgeInsets.only(top: 4),
+      padding: EdgeInsets.fromLTRB(12, 6, text == null ? 12 : 2, 6),
+      decoration: BoxDecoration(color: cs.surfaceContainerHighest, borderRadius: BorderRadius.circular(14)),
+      child: Row(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.center, children: [
+        if (text == null) ...[
+          SizedBox(width: 12, height: 12, child: CircularProgressIndicator(strokeWidth: 1.5, color: cs.onSurfaceVariant)),
+          const SizedBox(width: 8),
+          Text('转写中…', style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+        ] else ...[
+          Flexible(child: Text(text, style: tt.bodyMedium?.copyWith(color: cs.onSurface))),
+          IconButton(
+            visualDensity: VisualDensity.compact,
+            iconSize: 16,
+            tooltip: '复制文字',
+            icon: Icon(Icons.copy, color: cs.onSurfaceVariant),
+            onPressed: () {
+              Clipboard.setData(ClipboardData(text: text));
+              store.showToast('已复制');
+            },
+          ),
+        ],
+      ]),
     );
   }
 }

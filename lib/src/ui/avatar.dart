@@ -79,13 +79,52 @@ class GroupAvatar extends StatelessWidget {
 }
 
 class ConvAvatar extends StatelessWidget {
-  const ConvAvatar({super.key, this.conv, this.size = 40});
+  const ConvAvatar({super.key, this.conv, this.size = 40, this.online = false});
   final Conversation? conv;
   final double size;
+
+  /// 单聊对方在线时右下角显示绿点
+  final bool online;
 
   @override
   Widget build(BuildContext context) {
     if (conv?.isGroup == true) return GroupAvatar(users: conv!.membersPreview, size: size);
-    return UserAvatar(user: conv?.peer, size: size);
+    final avatar = UserAvatar(user: conv?.peer, size: size);
+    return online ? OnlineDot(size: size, child: avatar) : avatar;
+  }
+}
+
+/// 头像右下角的在线绿点
+class OnlineDot extends StatelessWidget {
+  const OnlineDot({super.key, required this.size, required this.child});
+  final double size;
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final d = (size * 0.28).clamp(8.0, 14.0);
+    return SizedBox(
+      width: size,
+      height: size,
+      child: Stack(clipBehavior: Clip.none, children: [
+        child,
+        Positioned(
+          right: 0,
+          bottom: 0,
+          child: Semantics(
+            label: '在线',
+            child: Container(
+              width: d,
+              height: d,
+              decoration: BoxDecoration(
+                color: const Color(0xFF34C759),
+                shape: BoxShape.circle,
+                border: Border.all(color: Theme.of(context).colorScheme.surface, width: 2),
+              ),
+            ),
+          ),
+        ),
+      ]),
+    );
   }
 }

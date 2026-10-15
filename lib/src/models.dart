@@ -277,6 +277,75 @@ class VoiceContent {
   }
 }
 
+/// 图片消息 content（JSON 字符串）
+class ImageContent {
+  final String key;
+  final String mime;
+  final int size;
+  final int width;
+  final int height;
+
+  const ImageContent({required this.key, required this.mime, required this.size, this.width = 0, this.height = 0});
+
+  factory ImageContent.fromJson(Map<String, dynamic> j) => ImageContent(
+        key: _str(j['key']),
+        mime: _str(j['mime']),
+        size: _int(j['size']),
+        width: _int(j['width']),
+        height: _int(j['height']),
+      );
+
+  Map<String, dynamic> toJson() => {'key': key, 'mime': mime, 'size': size, 'width': width, 'height': height};
+
+  String encode() => jsonEncode(toJson());
+
+  ImageContent withKey(String k) => ImageContent(key: k, mime: mime, size: size, width: width, height: height);
+
+  /// 解析消息里的图片内容；非图片或已撤回返回 null
+  static ImageContent? of(Message m) {
+    if (m.msgType != msgImage || m.recalled) return null;
+    try {
+      final d = jsonDecode(m.content);
+      return d is Map<String, dynamic> ? ImageContent.fromJson(d) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// 气泡显示尺寸：按原图比例缩放到最大 [maxW] x [maxH]（不放大）；缺少宽高时用方形占位
+(double, double) imageBubbleSize(int width, int height, {double maxW = 260, double maxH = 320}) {
+  if (width <= 0 || height <= 0) return (200, 200);
+  var w = width.toDouble();
+  var h = height.toDouble();
+  final scale = [maxW / w, maxH / h, 1.0].reduce((a, b) => a < b ? a : b);
+  w *= scale;
+  h *= scale;
+  // 极端长图 / 宽图保证最小可点区域
+  return (w < 60 ? 60 : w, h < 60 ? 60 : h);
+}
+
+/// 在线状态（GET /api/presence 与 WS presence 事件）
+class Presence {
+  final int userId;
+  final bool online;
+  final DateTime? lastSeen;
+
+  const Presence({required this.userId, this.online = false, this.lastSeen});
+
+  factory Presence.fromJson(Map<String, dynamic> j) =>
+      Presence(userId: _int(j['user_id']), online: _bool(j['online']), lastSeen: _dateOrNull(j['last_seen']));
+}
+
+/// POST /api/conversations/{id}/messages/{seq}/transcribe
+class TranscriptResult {
+  final String text;
+  final bool cached;
+  const TranscriptResult({required this.text, this.cached = false});
+  factory TranscriptResult.fromJson(Map<String, dynamic> j) =>
+      TranscriptResult(text: _str(j['text']), cached: _bool(j['cached']));
+}
+
 class SysUser {
   final int id;
   final String nickname;
@@ -457,6 +526,10 @@ class ClientConfig {
   final int? voiceMaxSeconds;
   final int? voiceMaxBytes;
   final int? voiceTtlDays;
+  final bool imageEnabled;
+  final int? imageMaxBytes;
+  final bool presenceEnabled;
+  final bool sttEnabled;
 
   const ClientConfig({
     this.recallSeconds = 120,
@@ -466,6 +539,10 @@ class ClientConfig {
     this.voiceMaxSeconds,
     this.voiceMaxBytes,
     this.voiceTtlDays,
+    this.imageEnabled = false,
+    this.imageMaxBytes,
+    this.presenceEnabled = false,
+    this.sttEnabled = false,
   });
 
   static const defaultReactions = ['❤️', '👍', '👎', '😂', '‼️', '❓'];
@@ -478,6 +555,10 @@ class ClientConfig {
         voiceMaxSeconds: _intOrNull(j['voice_max_seconds']),
         voiceMaxBytes: _intOrNull(j['voice_max_bytes']),
         voiceTtlDays: _intOrNull(j['voice_ttl_days']),
+        imageEnabled: _bool(j['image_enabled']),
+        imageMaxBytes: _intOrNull(j['image_max_bytes']),
+        presenceEnabled: _bool(j['presence_enabled']),
+        sttEnabled: _bool(j['stt_enabled']),
       );
 }
 

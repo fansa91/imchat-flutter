@@ -5,6 +5,7 @@ import '../api.dart';
 import '../models.dart';
 import '../settings.dart';
 import '../store.dart';
+import '../theme.dart';
 import '../util.dart';
 import 'avatar.dart';
 
@@ -203,8 +204,15 @@ class SettingsSheet extends StatelessWidget {
             selected: {settings.themeMode},
             onSelectionChanged: (s) => settings.setThemeMode(s.first),
           ),
+          const SizedBox(height: 16),
+          Text('主题色', style: tt.titleSmall),
           const SizedBox(height: 8),
-          Text('配色跟随系统壁纸（Material You）；系统不支持时使用默认配色。',
+          _SeedPicker(value: settings.seed, onChanged: settings.setSeed),
+          const SizedBox(height: 8),
+          Text(
+              settings.seed == seedSystem
+                  ? '跟随系统壁纸 / 强调色（Material You）；系统不支持时使用默认紫色。'
+                  : 'Material 3 配色，由所选主题色生成。',
               style: tt.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
           const SizedBox(height: 24),
           OutlinedButton.icon(
@@ -218,5 +226,63 @@ class SettingsSheet extends StatelessWidget {
         ]),
       ),
     );
+  }
+}
+
+/// 主题色选择：跟随系统 + 8 个种子色（与网页端相同）
+class _SeedPicker extends StatelessWidget {
+  const _SeedPicker({required this.value, required this.onChanged});
+  final String value;
+  final ValueChanged<String> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    final selected = parseSeed(value);
+    Widget swatch({required bool active, required String label, required VoidCallback onTap, required Widget child}) =>
+        Semantics(
+          button: true,
+          selected: active,
+          label: label,
+          child: InkWell(
+            customBorder: const CircleBorder(),
+            onTap: onTap,
+            child: Container(
+              width: 40,
+              height: 40,
+              padding: const EdgeInsets.all(3),
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                border: Border.all(color: active ? cs.onSurface : Colors.transparent, width: 2),
+              ),
+              child: child,
+            ),
+          ),
+        );
+
+    return Wrap(spacing: 8, runSpacing: 8, children: [
+      swatch(
+        active: selected == null,
+        label: '跟随系统',
+        onTap: () => onChanged(seedSystem),
+        child: Container(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: SweepGradient(colors: [...themeSeeds, themeSeeds.first]),
+          ),
+          child: Icon(Icons.auto_awesome, size: 16, color: selected == null ? Colors.white : Colors.white70),
+        ),
+      ),
+      for (final c in themeSeeds)
+        swatch(
+          active: selected?.toARGB32() == c.toARGB32(),
+          label: seedToString(c),
+          onTap: () => onChanged(seedToString(c)),
+          child: Container(
+            decoration: BoxDecoration(color: c, shape: BoxShape.circle),
+            child: selected?.toARGB32() == c.toARGB32() ? const Icon(Icons.check, size: 18, color: Colors.white) : null,
+          ),
+        ),
+    ]);
   }
 }

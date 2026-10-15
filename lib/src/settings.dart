@@ -3,6 +3,7 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import 'api.dart';
+import 'theme.dart';
 
 const String defaultServer = 'https://im.fansa.ccwu.cc';
 
@@ -15,6 +16,7 @@ class Settings extends ChangeNotifier {
   static const _kServer = 'im.server';
   static const _kServers = 'im.servers';
   static const _kTheme = 'im.theme';
+  static const _kSeed = 'im.seed';
   static const _kToken = 'im.token';
   static const _kTokenFallback = 'im.token.fallback';
 
@@ -24,11 +26,15 @@ class Settings extends ChangeNotifier {
   String _server = defaultServer;
   List<String> _servers = [defaultServer];
   ThemeMode _themeMode = ThemeMode.system;
+  String _seed = seedSystem;
   String _token = '';
 
   String get server => _server;
   List<String> get servers => List.unmodifiable(_servers);
   ThemeMode get themeMode => _themeMode;
+
+  /// 主题色：'system'（跟随系统 / 壁纸取色）或 '#RRGGBB'
+  String get seed => _seed;
   String get token => _token;
 
   static Future<Settings> load() async {
@@ -42,6 +48,8 @@ class Settings extends ChangeNotifier {
       'dark' => ThemeMode.dark,
       _ => ThemeMode.system,
     };
+    final seed = prefs.getString(_kSeed);
+    s._seed = parseSeed(seed) == null ? seedSystem : seed!;
     s._token = await s._readToken();
     return s;
   }
@@ -108,6 +116,18 @@ class Settings extends ChangeNotifier {
     });
     notifyListeners();
   }
+
+  Future<void> setSeed(String v) async {
+    _seed = parseSeed(v) == null ? seedSystem : v;
+    await _prefs.setString(_kSeed, _seed);
+    notifyListeners();
+  }
+
+  /// 语音转文字结果本地缓存（按服务器区分）
+  String _sttKey(int cid, int seq) => 'im.stt.$_server.$cid:$seq';
+  String? transcript(int cid, int seq) => _prefs.getString(_sttKey(cid, seq));
+  Future<void> saveTranscript(int cid, int seq, String text) => _prefs.setString(_sttKey(cid, seq), text);
+  Future<void> removeTranscript(int cid, int seq) => _prefs.remove(_sttKey(cid, seq));
 
   /// 群公告“已关闭”标记（与 web 的 im.ann.{id} 一致）
   String? annDismissed(int cid) => _prefs.getString('im.ann.$_server.$cid');

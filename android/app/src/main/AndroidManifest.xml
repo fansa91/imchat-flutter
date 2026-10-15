@@ -1,7 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET"/>
     <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+    <!-- 保存图片到相册（gal）：Android 10 及以下需要；选图用系统 Photo Picker，无需读取权限 -->
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="29"/>
     <application
+        android:requestLegacyExternalStorage="true"
         android:label="IMChat"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">

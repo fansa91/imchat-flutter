@@ -133,9 +133,21 @@ class _ChatViewState extends State<ChatView> {
       if (m.senderId == me.id && m.msgType != msgSystem && !m.recalled) lastMine = i;
     }
 
+    final presenceOn = store.config.presenceEnabled;
+    final peerId = conv?.peer?.id ?? 0;
+    final peerOnline = !isGroup && peerId != 0 && store.isOnline(peerId);
+    String idleSubtitle;
+    if (isGroup) {
+      final online = presenceOn ? store.onlineCount(id) : null;
+      idleSubtitle = '${conv?.memberCount ?? ''} 位成员${online != null ? ' · $online 人在线' : ''}';
+    } else if (presenceOn && peerId != 0 && store.presence.containsKey(peerId)) {
+      idleSubtitle = peerOnline ? '在线' : lastSeenText(store.presence[peerId]!.lastSeen);
+    } else {
+      idleSubtitle = conv?.peer?.email ?? '';
+    }
     final subtitle = typingOn
         ? (isGroup ? '${displayName(store.users[typing!.uid])} 正在输入…' : '正在输入…')
-        : (isGroup ? '${conv?.memberCount ?? ''} 位成员' : (conv?.peer?.email ?? ''));
+        : idleSubtitle;
 
     final annAt = conv?.announcementAt?.toUtc().toIso8601String() ?? '';
     final showAnn = isGroup && (conv?.announcement.isNotEmpty ?? false) && settings.annDismissed(id) != annAt;
@@ -260,7 +272,7 @@ class _ChatViewState extends State<ChatView> {
             ? IconButton(tooltip: '返回', icon: const Icon(Icons.arrow_back), onPressed: widget.onBack)
             : null,
         title: Row(children: [
-          ConvAvatar(conv: conv, size: 40),
+          ConvAvatar(conv: conv, size: 40, online: peerOnline),
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [

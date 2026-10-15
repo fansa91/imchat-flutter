@@ -7,12 +7,10 @@ import 'package:provider/provider.dart';
 
 import 'src/settings.dart';
 import 'src/store.dart';
+import 'src/theme.dart';
 import 'src/ui/home_page.dart';
 import 'src/ui/login_page.dart';
 import 'src/ui/voice_player.dart';
-
-/// 动态取色不可用时的种子色
-const Color seedColor = Color(0xFF2F6FED);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -44,11 +42,15 @@ class IMChatApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final mode = context.select<Settings, ThemeMode>((s) => s.themeMode);
+    final fixed = parseSeed(context.select<Settings, String>((s) => s.seed));
     return DynamicColorBuilder(
       builder: (lightDynamic, darkDynamic) {
-        final light = lightDynamic?.harmonized() ?? ColorScheme.fromSeed(seedColor: seedColor);
-        final dark = darkDynamic?.harmonized() ??
-            ColorScheme.fromSeed(seedColor: seedColor, brightness: Brightness.dark);
+        // “跟随系统”：用系统壁纸 / 强调色（dynamic_color），平台不支持时回退第一个种子色；
+        // 选了固定种子色：Material 3 tonal spot
+        final useDynamic = fixed == null && lightDynamic != null && darkDynamic != null;
+        final seed = fixed ?? themeSeeds.first;
+        final light = useDynamic ? lightDynamic.harmonized() : schemeFromSeed(seed, Brightness.light);
+        final dark = useDynamic ? darkDynamic.harmonized() : schemeFromSeed(seed, Brightness.dark);
         return MaterialApp(
           title: 'IMChat',
           debugShowCheckedModeBanner: false,

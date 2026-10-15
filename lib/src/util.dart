@@ -76,8 +76,22 @@ String previewOf(Message m, int? meId, String Function(int id) senderName) {
   if (m.msgType == msgText) return m.content;
   if (m.msgType == msgVoice) return '[语音]';
   if (m.msgType == msgImage) return '[图片]';
-  return '[消息]';
+  return unsupportedText;
 }
+
+/// 本客户端不认识的消息类型
+const String unsupportedText = '[不支持的消息，请升级]';
+
+/// 引用 / 回复栏里的短预览（不处理撤回）
+String shortPreview(Message m) => switch (m.msgType) {
+      msgText => m.content,
+      msgVoice => '[语音]',
+      msgImage => '[图片]',
+      _ => '[消息]',
+    };
+
+/// “最后在线”时间：今天 14:03 / 昨天 14:03 / 周一 14:03 / 10月1日 14:03
+String lastSeenText(DateTime? d, [DateTime? now]) => d == null ? '离线' : '最后在线 ${dayLabel(d, now)}';
 
 /// 自己发出的系统消息是否表示“我已不在群里”（退群 / 被移出）
 bool isMyExit(Message m, int? meId) {

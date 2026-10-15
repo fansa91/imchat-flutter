@@ -2,11 +2,13 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../models.dart';
 import '../recorder.dart';
 import '../store.dart';
+import '../util.dart';
 
 final Map<int, String> _drafts = {};
 
@@ -96,6 +98,60 @@ class ComposerState extends State<Composer> {
     focus();
   }
 
+  /// 选图发送：移动端可选相册 / 拍照，桌面端打开文件选择（可多选，最多 9 张）
+  Future<void> _pickImage() async {
+    final store = context.read<ChatStore>();
+    var source = ImageSource.gallery;
+    if (Platform.isAndroid || Platform.isIOS) {
+      final s = await showModalBottomSheet<ImageSource>(
+        context: context,
+        showDragHandle: true,
+        builder: (ctx) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('从相册选择'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('拍照'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      );
+      if (s == null) return;
+      source = s;
+    }
+    final picker = ImagePicker();
+    List<XFile> files;
+    try {
+      if (source == ImageSource.camera) {
+        final f = await picker.pickImage(source: ImageSource.camera);
+        files = f == null ? const [] : [f];
+      } else {
+        files = await picker.pickMultiImage(limit: 9);
+      }
+    } catch (e) {
+      store.showToast(source == ImageSource.camera ? '无法打开相机' : '无法打开图片选择');
+      return;
+    }
+    if (files.isEmpty) return;
+    int? reply = widget.replyTo?.seq;
+    widget.onSent();
+    for (final f in files.take(9)) {
+      try {
+        final bytes = await f.readAsBytes();
+        await store.sendImage(widget.id, bytes, replyToSeq: reply);
+      } catch (_) {
+        store.showToast('无法读取图片');
+      }
+      reply = null; // 只有第一张带引用
+    }
+  }
+
   int get _maxSec => context.read<ChatStore>().config.voiceMaxSeconds ?? 60;
 
   Future<void> _startRecording() async {
@@ -179,6 +235,7 @@ class ComposerState extends State<Composer> {
   Widget build(BuildContext context) {
     final store = context.read<ChatStore>();
     final voiceEnabled = context.select<ChatStore, bool>((s) => s.config.voiceEnabled);
+    final imageEnabled = context.select<ChatStore, bool>((s) => s.config.imageEnabled);
     final cs = Theme.of(context).colorScheme;
     final tt = Theme.of(context).textTheme;
     final reply = widget.replyTo;
@@ -313,7 +370,7 @@ class ComposerState extends State<Composer> {
                   child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                     Text('回复 ${store.nameOf(reply.senderId)}', style: tt.labelMedium?.copyWith(color: cs.primary)),
                     Text(
-                      reply.msgType == msgText ? reply.content : (reply.msgType == msgVoice ? '[语音]' : '[消息]'),
+                      shortPreview(reply),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: tt.bodySmall?.copyWith(color: cs.onSurfaceVariant),
@@ -326,6 +383,15 @@ class ComposerState extends State<Composer> {
           Padding(
             padding: const EdgeInsets.fromLTRB(8, 6, 8, 8),
             child: Row(crossAxisAlignment: CrossAxisAlignment.end, children: [
+              if (imageEnabled && rec == null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: IconButton(
+                    tooltip: '发送图片',
+                    icon: const Icon(Icons.add_photo_alternate_outlined),
+                    onPressed: _pickImage,
+                  ),
+                ),
               Expanded(child: field),
               const SizedBox(width: 8),
               button,

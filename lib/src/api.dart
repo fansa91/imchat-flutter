@@ -47,14 +47,15 @@ class Api {
     return base.replace(path: '${base.path}$path', queryParameters: (query == null || query.isEmpty) ? null : query);
   }
 
-  Future<dynamic> _req(String method, String path, {Object? body, Map<String, String>? query}) async {
+  Future<dynamic> _req(String method, String path,
+      {Object? body, Map<String, String>? query, Duration timeout = const Duration(seconds: 20)}) async {
     final req = http.Request(method, _uri(path, query));
     req.headers['Content-Type'] = 'application/json';
     if (token.isNotEmpty) req.headers['Authorization'] = 'Bearer $token';
     if (body != null) req.body = jsonEncode(body);
     http.Response res;
     try {
-      res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 20)));
+      res = await http.Response.fromStream(await _client.send(req).timeout(timeout));
     } catch (_) {
       throw ApiError(0, 'network', '网络连接失败');
     }
@@ -159,6 +160,22 @@ class Api {
       PresignResult.fromJson(_map(await _req('POST', '/api/uploads/presign',
           body: {'kind': 'voice', 'mime': mime, 'size': size, 'duration_ms': durationMs})));
 
+  // v0.3.0
+  Future<PresignResult> presignImage({required String mime, required int size, required int width, required int height}) async =>
+      PresignResult.fromJson(_map(await _req('POST', '/api/uploads/presign',
+          body: {'kind': 'image', 'mime': mime, 'size': size, 'width': width, 'height': height})));
+
+  Future<List<Presence>> presence(List<int> ids) async {
+    if (ids.isEmpty) return const [];
+    return _list(await _req('GET', '/api/presence', query: {'ids': ids.join(',')}))
+        .whereType<Map<String, dynamic>>()
+        .map(Presence.fromJson)
+        .toList();
+  }
+
+  Future<TranscriptResult> transcribe(int cid, int seq) async => TranscriptResult.fromJson(
+      _map(await _req('POST', '/api/conversations/$cid/messages/$seq/transcribe', timeout: const Duration(seconds: 70))));
+
   Future<MediaInfo> media(int cid, int seq) async =>
       MediaInfo.fromJson(_map(await _req('GET', '/api/conversations/$cid/messages/$seq/media')));
 
@@ -167,7 +184,7 @@ class Api {
     final req = http.Request(pre.method.isEmpty ? 'PUT' : pre.method, Uri.parse(pre.url));
     req.headers.addAll(pre.headers);
     req.bodyBytes = bytes;
-    final res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 60)));
+    final res = await http.Response.fromStream(await _client.send(req).timeout(const Duration(seconds: 120)));
     if (res.statusCode < 200 || res.statusCode >= 300) {
       throw ApiError(res.statusCode, 'upload', '上传失败 (${res.statusCode})');
     }

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 
 import '../models.dart';
 import '../store.dart';
+import 'image_bubble.dart';
 import 'voice_player.dart';
 
 /// 消息操作：表情回应 + 回复 / 复制 / 撤回 / 删除（仅自己）
@@ -80,6 +81,41 @@ class _MessageMenu extends StatelessWidget {
                 Clipboard.setData(ClipboardData(text: m.content));
                 Navigator.pop(context);
                 store.showToast('已复制');
+              },
+            ),
+          if (store.canTranscribe(m))
+            ListTile(
+              leading: const Icon(Icons.subtitles_outlined),
+              title: const Text('转文字'),
+              onTap: () {
+                Navigator.pop(context);
+                store.transcribe(m);
+              },
+            ),
+          if (m.msgType == msgVoice && store.transcriptOf(m) != null)
+            ListTile(
+              leading: const Icon(Icons.copy),
+              title: const Text('复制文字'),
+              onTap: () {
+                Clipboard.setData(ClipboardData(text: store.transcriptOf(m)!));
+                Navigator.pop(context);
+                store.showToast('已复制');
+              },
+            ),
+          if (m.msgType == msgImage && !m.recalled && store.imageState(m) == MediaState.ready)
+            ListTile(
+              leading: const Icon(Icons.download),
+              title: const Text('保存图片'),
+              onTap: () async {
+                Navigator.pop(context);
+                final f = await store.imageFile(m);
+                if (f == null) return;
+                try {
+                  final msg = await saveImage(f, suggestedImageName(m, f));
+                  if (msg != null) store.showToast(msg);
+                } catch (_) {
+                  store.showToast('保存失败');
+                }
               },
             ),
           if (store.canRecall(m))

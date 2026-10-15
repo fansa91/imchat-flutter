@@ -247,7 +247,9 @@ class _GroupInfoPageState extends State<GroupInfoPage> {
           ),
           for (final m in sorted)
             ListTile(
-              leading: UserAvatar(user: m.user),
+              leading: store.config.presenceEnabled && store.isOnline(m.user.id)
+                  ? OnlineDot(size: 40, child: UserAvatar(user: m.user))
+                  : UserAvatar(user: m.user),
               title: Row(children: [
                 Flexible(child: Text(m.user.id == meId ? '${displayName(m.user)}（我）' : displayName(m.user), overflow: TextOverflow.ellipsis)),
                 if (m.role > 0) ...[

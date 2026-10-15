@@ -124,7 +124,7 @@ class _ConvTile extends StatelessWidget {
         selectedTileColor: cs.secondaryContainer,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(28)),
         contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
-        leading: ConvAvatar(conv: c, size: 48),
+        leading: ConvAvatar(conv: c, size: 48, online: !c.isGroup && c.peer != null && store.isOnline(c.peer!.id)),
         title: Row(children: [
           Expanded(
             child: Text(
