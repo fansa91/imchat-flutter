@@ -7,6 +7,7 @@ import '../store.dart';
 import '../util.dart';
 import 'avatar.dart';
 import 'image_bubble.dart';
+import 'media_bubbles.dart';
 import 'voice_bubble.dart';
 
 class MessageItem extends StatelessWidget {
@@ -44,6 +45,15 @@ class MessageItem extends StatelessWidget {
     if (m.msgType == msgSystem) {
       return _SysLine(text: systemText(m, meId));
     }
+    if (m.msgType == msgCall && !m.recalled) {
+      // 通话记录：居中灰字，与系统消息同风格（SPEC §1.4）
+      final cc = CallContent.of(m);
+      return _SysLine(
+        text: callText(m),
+        leading: Icon(cc?.isVideo == true ? Icons.videocam_outlined : Icons.call_outlined,
+            size: 15, color: cs.onSurfaceVariant),
+      );
+    }
     if (m.recalled) {
       final draft = mine ? store.recalledDrafts['${m.conversationId}:${m.seq}'] : null;
       return _SysLine(
@@ -72,10 +82,15 @@ class MessageItem extends StatelessWidget {
 
     Widget content;
     final isImage = m.msgType == msgImage;
+    final isVideo = m.msgType == msgVideo;
     if (m.msgType == msgVoice) {
       content = VoiceBubble(m: m, mine: mine);
     } else if (isImage) {
       content = ImageBubble(m: m, mine: mine);
+    } else if (isVideo) {
+      content = VideoBubble(m: m, mine: mine);
+    } else if (m.msgType == msgFile) {
+      content = FileBubble(m: m, mine: mine);
     } else if (m.msgType == msgText) {
       content = Padding(
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
@@ -92,7 +107,7 @@ class MessageItem extends StatelessWidget {
       opacity: m.status == MsgStatus.sending ? 0.7 : 1,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 300),
-        clipBehavior: isImage ? Clip.antiAlias : Clip.none,
+        clipBehavior: isImage || isVideo ? Clip.antiAlias : Clip.none,
         decoration: BoxDecoration(
           color: highlighted ? cs.tertiary : bubbleColor,
           borderRadius: radius,
@@ -253,9 +268,10 @@ class _Transcript extends StatelessWidget {
 }
 
 class _SysLine extends StatelessWidget {
-  const _SysLine({required this.text, this.action});
+  const _SysLine({required this.text, this.action, this.leading});
   final String text;
   final Widget? action;
+  final Widget? leading;
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -264,7 +280,9 @@ class _SysLine extends StatelessWidget {
       child: Wrap(
         alignment: WrapAlignment.center,
         crossAxisAlignment: WrapCrossAlignment.center,
+        spacing: 6,
         children: [
+          ?leading,
           Text(text, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
           ?action,
         ],

@@ -1,9 +1,11 @@
 import 'dart:io';
 
+import 'package:file_selector/file_selector.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
+import 'package:video_player/video_player.dart';
 
 import '../models.dart';
 import '../recorder.dart';
@@ -152,6 +154,112 @@ class ComposerState extends State<Composer> {
     }
   }
 
+  /// 选视频发送：相册视频 / 拍摄；元数据（时长/宽高/mime）用 video_player 探测
+  Future<void> _pickVideo() async {
+    final store = context.read<ChatStore>();
+    var source = ImageSource.gallery;
+    if (Platform.isAndroid || Platform.isIOS) {
+      final s = await showModalBottomSheet<ImageSource>(
+        context: context,
+        showDragHandle: true,
+        builder: (ctx) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(
+              leading: const Icon(Icons.video_library_outlined),
+              title: const Text('从相册选择视频'),
+              onTap: () => Navigator.pop(ctx, ImageSource.gallery),
+            ),
+            ListTile(
+              leading: const Icon(Icons.videocam_outlined),
+              title: const Text('拍摄视频'),
+              onTap: () => Navigator.pop(ctx, ImageSource.camera),
+            ),
+            const SizedBox(height: 8),
+          ]),
+        ),
+      );
+      if (s == null) return;
+      source = s;
+    }
+    XFile? xf;
+    try {
+      xf = await ImagePicker().pickVideo(source: source, maxDuration: const Duration(minutes: 10));
+    } catch (_) {
+      store.showToast('无法打开视频选择');
+      return;
+    }
+    if (xf == null) return;
+    final file = File(xf.path);
+    var durationMs = 0, width = 0, height = 0;
+    VideoPlayerController? probe;
+    try {
+      probe = VideoPlayerController.file(file);
+      await probe.initialize();
+      durationMs = probe.value.duration.inMilliseconds;
+      width = probe.value.size.width.round();
+      height = probe.value.size.height.round();
+    } catch (_) {
+      // 探测失败不阻塞发送，宽高/时长填 0（服务端校验会拒绝时再提示）
+    } finally {
+      await probe?.dispose();
+    }
+    final mime = _videoMime(xf.name, xf.mimeType);
+    widget.onSent();
+    await store.sendVideoFile(
+      widget.id,
+      file,
+      mime: mime,
+      durationMs: durationMs,
+      width: width,
+      height: height,
+      replyToSeq: widget.replyTo?.seq,
+    );
+  }
+
+  static String _videoMime(String name, String? pickerMime) {
+    if (pickerMime != null && pickerMime.startsWith('video/')) return pickerMime;
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    return switch (ext) {
+      'webm' => 'video/webm',
+      'mov' => 'video/quicktime',
+      _ => 'video/mp4',
+    };
+  }
+
+  static String _fileMime(String name) {
+    final ext = name.contains('.') ? name.split('.').last.toLowerCase() : '';
+    return switch (ext) {
+      'pdf' => 'application/pdf',
+      'zip' => 'application/zip',
+      'txt' || 'md' => 'text/plain',
+      'jpg' || 'jpeg' => 'image/jpeg',
+      'png' => 'image/png',
+      'mp4' => 'video/mp4',
+      'mp3' => 'audio/mpeg',
+      'doc' => 'application/msword',
+      'docx' => 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      'xls' => 'application/vnd.ms-excel',
+      'xlsx' => 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      _ => 'application/octet-stream',
+    };
+  }
+
+  /// 选文件发送（单个，原样上传）
+  Future<void> _pickFile() async {
+    final store = context.read<ChatStore>();
+    XFile? xf;
+    try {
+      xf = await openFile();
+    } catch (_) {
+      store.showToast('无法打开文件选择');
+      return;
+    }
+    if (xf == null) return;
+    widget.onSent();
+    await store.sendFileMessage(widget.id, File(xf.path),
+        name: xf.name, mime: _fileMime(xf.name), replyToSeq: widget.replyTo?.seq);
+  }
+
   int get _maxSec => context.read<ChatStore>().config.voiceMaxSeconds ?? 60;
 
   Future<void> _startRecording() async {
@@ -236,6 +344,8 @@ class ComposerState extends State<Composer> {
     final store = context.read<ChatStore>();
     final voiceEnabled = context.select<ChatStore, bool>((s) => s.config.voiceEnabled);
     final imageEnabled = context.select<ChatStore, bool>((s) => s.config.imageEnabled);
+    final videoEnabled = context.select<ChatStore, bool>((s) => s.config.videoEnabled);
+    final fileEnabled = context.select<ChatStore, bool>((s) => s.config.fileEnabled);
     final cs = Theme.of(context).colorScheme;
     final tt = Theme.of(context).textTheme;
     final reply = widget.replyTo;
@@ -390,6 +500,41 @@ class ComposerState extends State<Composer> {
                     tooltip: '发送图片',
                     icon: const Icon(Icons.add_photo_alternate_outlined),
                     onPressed: _pickImage,
+                  ),
+                ),
+              if ((videoEnabled || fileEnabled) && rec == null)
+                Padding(
+                  padding: const EdgeInsets.only(right: 4),
+                  child: IconButton(
+                    tooltip: '发送视频 / 文件',
+                    icon: const Icon(Icons.attach_file),
+                    onPressed: () => showModalBottomSheet<void>(
+                      context: context,
+                      showDragHandle: true,
+                      builder: (ctx) => SafeArea(
+                        child: Column(mainAxisSize: MainAxisSize.min, children: [
+                          if (videoEnabled)
+                            ListTile(
+                              leading: const Icon(Icons.video_library_outlined),
+                              title: const Text('发送视频'),
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _pickVideo();
+                              },
+                            ),
+                          if (fileEnabled)
+                            ListTile(
+                              leading: const Icon(Icons.folder_open_outlined),
+                              title: const Text('发送文件'),
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _pickFile();
+                              },
+                            ),
+                          const SizedBox(height: 8),
+                        ]),
+                      ),
+                    ),
                   ),
                 ),
               Expanded(child: field),

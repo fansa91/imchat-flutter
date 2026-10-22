@@ -64,7 +64,7 @@ class _MessageMenu extends StatelessWidget {
               child: Text(readInfo!, style: TextStyle(color: cs.onSurfaceVariant)),
             ),
           const SizedBox(height: 8),
-          if (confirmed)
+          if (confirmed && m.msgType != msgCall)
             ListTile(
               leading: const Icon(Icons.reply),
               title: const Text('回复'),

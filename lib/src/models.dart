@@ -4,6 +4,9 @@ import 'dart:convert';
 const int msgText = 1;
 const int msgImage = 2;
 const int msgVoice = 3;
+const int msgVideo = 4;
+const int msgFile = 5;
+const int msgCall = 6;
 const int msgSystem = 10;
 
 const int convDirect = 1;
@@ -313,6 +316,142 @@ class ImageContent {
   }
 }
 
+/// 视频消息 content（JSON 字符串，SPEC v0.4.0 §2.2）
+class VideoContent {
+  final String key;
+  final String mime;
+  final int size;
+  final int durationMs;
+  final int width;
+  final int height;
+  final String posterKey;
+
+  const VideoContent({
+    required this.key,
+    required this.mime,
+    required this.size,
+    this.durationMs = 0,
+    this.width = 0,
+    this.height = 0,
+    this.posterKey = '',
+  });
+
+  factory VideoContent.fromJson(Map<String, dynamic> j) => VideoContent(
+        key: _str(j['key']),
+        mime: _str(j['mime']),
+        size: _int(j['size']),
+        durationMs: _int(j['duration_ms']),
+        width: _int(j['width']),
+        height: _int(j['height']),
+        posterKey: _str(j['poster_key']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'key': key,
+        'mime': mime,
+        'size': size,
+        'duration_ms': durationMs,
+        'width': width,
+        'height': height,
+        if (posterKey.isNotEmpty) 'poster_key': posterKey,
+      };
+
+  String encode() => jsonEncode(toJson());
+
+  VideoContent withKey(String k) => VideoContent(
+      key: k, mime: mime, size: size, durationMs: durationMs, width: width, height: height, posterKey: posterKey);
+
+  static VideoContent? of(Message m) {
+    if (m.msgType != msgVideo || m.recalled) return null;
+    try {
+      final d = jsonDecode(m.content);
+      return d is Map<String, dynamic> ? VideoContent.fromJson(d) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// 文件消息 content（JSON 字符串，SPEC v0.4.0 §2.2）
+class FileContent {
+  final String key;
+  final String mime;
+  final int size;
+  final String name;
+
+  const FileContent({required this.key, required this.mime, required this.size, required this.name});
+
+  factory FileContent.fromJson(Map<String, dynamic> j) => FileContent(
+        key: _str(j['key']),
+        mime: _str(j['mime']),
+        size: _int(j['size']),
+        name: _str(j['name']),
+      );
+
+  Map<String, dynamic> toJson() => {'key': key, 'mime': mime, 'size': size, 'name': name};
+
+  String encode() => jsonEncode(toJson());
+
+  FileContent withKey(String k) => FileContent(key: k, mime: mime, size: size, name: name);
+
+  static FileContent? of(Message m) {
+    if (m.msgType != msgFile || m.recalled) return null;
+    try {
+      final d = jsonDecode(m.content);
+      return d is Map<String, dynamic> ? FileContent.fromJson(d) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
+/// 通话记录 content（JSON 字符串，SPEC v0.4.0 §1.4；只能由服务端生成）
+class CallContent {
+  final String callId;
+  final String kind; // audio | video
+  final String outcome; // completed | missed | rejected | cancelled | busy | failed
+  final int durationMs;
+  final int callerId;
+
+  const CallContent({
+    required this.callId,
+    this.kind = 'audio',
+    this.outcome = '',
+    this.durationMs = 0,
+    this.callerId = 0,
+  });
+
+  factory CallContent.fromJson(Map<String, dynamic> j) => CallContent(
+        callId: _str(j['call_id']),
+        kind: _str(j['kind']).isEmpty ? 'audio' : _str(j['kind']),
+        outcome: _str(j['outcome']),
+        durationMs: _int(j['duration_ms']),
+        callerId: _int(j['caller_id']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'call_id': callId,
+        'kind': kind,
+        'outcome': outcome,
+        'duration_ms': durationMs,
+        'caller_id': callerId,
+      };
+
+  String encode() => jsonEncode(toJson());
+
+  bool get isVideo => kind == 'video';
+
+  static CallContent? of(Message m) {
+    if (m.msgType != msgCall) return null;
+    try {
+      final d = jsonDecode(m.content);
+      return d is Map<String, dynamic> ? CallContent.fromJson(d) : null;
+    } catch (_) {
+      return null;
+    }
+  }
+}
+
 /// 气泡显示尺寸：按原图比例缩放到最大 [maxW] x [maxH]（不放大）；缺少宽高时用方形占位
 (double, double) imageBubbleSize(int width, int height, {double maxW = 260, double maxH = 320}) {
   if (width <= 0 || height <= 0) return (200, 200);
@@ -530,6 +669,14 @@ class ClientConfig {
   final int? imageMaxBytes;
   final bool presenceEnabled;
   final bool sttEnabled;
+  // v0.4.0
+  final bool callEnabled;
+  final int? callRingTimeoutSeconds;
+  final bool fileEnabled;
+  final int? fileMaxBytes;
+  final bool videoEnabled;
+  final int? videoMaxBytes;
+  final bool passwordResetEnabled;
 
   const ClientConfig({
     this.recallSeconds = 120,
@@ -543,6 +690,13 @@ class ClientConfig {
     this.imageMaxBytes,
     this.presenceEnabled = false,
     this.sttEnabled = false,
+    this.callEnabled = false,
+    this.callRingTimeoutSeconds,
+    this.fileEnabled = false,
+    this.fileMaxBytes,
+    this.videoEnabled = false,
+    this.videoMaxBytes,
+    this.passwordResetEnabled = false,
   });
 
   static const defaultReactions = ['❤️', '👍', '👎', '😂', '‼️', '❓'];
@@ -559,6 +713,13 @@ class ClientConfig {
         imageMaxBytes: _intOrNull(j['image_max_bytes']),
         presenceEnabled: _bool(j['presence_enabled']),
         sttEnabled: _bool(j['stt_enabled']),
+        callEnabled: _bool(j['call_enabled']),
+        callRingTimeoutSeconds: _intOrNull(j['call_ring_timeout_seconds']),
+        fileEnabled: _bool(j['file_enabled']),
+        fileMaxBytes: _intOrNull(j['file_max_bytes']),
+        videoEnabled: _bool(j['video_enabled']),
+        videoMaxBytes: _intOrNull(j['video_max_bytes']),
+        passwordResetEnabled: _bool(j['password_reset_enabled']),
       );
 }
 

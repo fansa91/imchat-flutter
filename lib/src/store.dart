@@ -8,6 +8,8 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import 'api.dart';
+import 'call.dart';
+import 'file_cache.dart';
 import 'image_cache.dart';
 import 'image_prep.dart';
 import 'models.dart';
@@ -94,6 +96,25 @@ class ChatStore extends ChangeNotifier {
       _onDeleted(_i(m['conversation_id']), ((m['seqs'] as List?) ?? const []).map(_i).toList());
     });
     socket.on('presence', (d, _) => _onPresence(Presence.fromJson(_m(d))));
+    // v0.4.0：通话信令全部转发给 CallManager；资料变更与登录态吊销
+    for (final t in ['call_invite', 'call_accept', 'call_reject', 'call_cancel', 'call_hangup', 'call_signal', 'call_unavailable']) {
+      socket.on(t, (d, _) => calls.handleEvent(t, _m(d)));
+    }
+    socket.on('user_updated', (d, _) {
+      final u = _m(d)['user'];
+      if (u is Map<String, dynamic>) _onUserUpdated(User.fromJson(u));
+    });
+    socket.on('session_revoked', (d, _) async {
+      // 若是本设备刚改完密码：本地已换上新 token，校验通过则不登出，
+      // 等 socket 用新 token 重连即可（其他设备已被踢）。
+      try {
+        await api.me();
+        showToast('密码已修改，其他设备已退出登录');
+      } catch (_) {
+        showToast('密码已变更，本设备已退出登录');
+        logout();
+      }
+    });
     socket.on('conversation_updated', (d, _) => refreshConversation(_i(_m(d)['conversation_id'])));
     socket.on('conversation_removed', (d, _) => _dropConversation(_i(_m(d)['conversation_id'])));
     socket.on('error', (d, id) {
@@ -112,8 +133,13 @@ class ChatStore extends ChangeNotifier {
   final Settings settings;
   final Api api;
   late final ChatSocket socket;
+
+  /// v0.4.0 通话管理（信令经本 store 的 socket 转发进来）
+  late final CallManager calls = CallManager(this);
   VoiceCache? _cache;
   ImageFileCache? _imgCache;
+  MediaFileCache? _fileCache;
+  MediaFileCache? _videoCache;
 
   User? me;
   bool booting = true;
@@ -159,6 +185,12 @@ class ChatStore extends ChangeNotifier {
 
   /// 本地图片文件：发送中的按 client_msg_id，已确认的按 imageKey
   final Map<String, File> _localImage = {};
+
+  /// 本地文件/视频：发送中的按 client_msg_id，已下载的按 `kind:cid:seq`
+  final Map<String, File> _localMedia = {};
+
+  /// 大文件上传进度：client_msg_id -> 0.0~1.0
+  final Map<String, double> uploadProgress = {};
   final List<(int, int, bool)> _downloadQueue = [];
   int _downloading = 0;
 
@@ -225,6 +257,8 @@ class ChatStore extends ChangeNotifier {
   Future<void> _afterLogin() async {
     _cache = await VoiceCache.open(settings.server);
     _imgCache = await ImageFileCache.open(settings.server);
+    _fileCache = await MediaFileCache.open(settings.server, 'file');
+    _videoCache = await MediaFileCache.open(settings.server, 'video');
     socket.start();
     api.config().then((c) {
       config = c;
@@ -255,6 +289,9 @@ class ChatStore extends ChangeNotifier {
     _timers.clear();
     _localVoice.clear();
     _localImage.clear();
+    _localMedia.clear();
+    uploadProgress.clear();
+    calls.forceEnd();
     _downloadQueue.clear();
     me = null;
     conn = ConnState.offline;
@@ -377,7 +414,7 @@ class ChatStore extends ChangeNotifier {
       for (final t in threads.values) {
         for (final m in t.pending.toList()) {
           if (m.status == MsgStatus.sending) {
-            if (m.msgType == msgVoice || m.msgType == msgImage) {
+            if (m.msgType == msgVoice || m.msgType == msgImage || m.msgType == msgVideo || m.msgType == msgFile) {
               _uploadAndSend(m);
             } else {
               _transmit(m);
@@ -719,6 +756,7 @@ class ChatStore extends ChangeNotifier {
 
   Future<void> _uploadAndSend(Message m) async {
     if (m.msgType == msgImage) return _uploadImageAndSend(m);
+    if (m.msgType == msgVideo || m.msgType == msgFile) return _uploadMediaAndSend(m);
     final file = _localVoice[m.clientMsgId];
     final vc = VoiceContent.of(m);
     if (vc == null) return _failPending(m.clientMsgId);
@@ -762,10 +800,92 @@ class ChatStore extends ChangeNotifier {
     _transmit(cur);
   }
 
+  /// 视频：本地文件先占位（元数据由调用方探测好），带进度上传后再发送
+  Future<void> sendVideoFile(
+    int id,
+    File file, {
+    required String mime,
+    required int durationMs,
+    required int width,
+    required int height,
+    String posterKey = '',
+    int? replyToSeq,
+  }) async {
+    if (me == null) return;
+    final size = await file.length();
+    final maxBytes = config.videoMaxBytes ?? 104857600;
+    if (size > maxBytes) {
+      showToast('视频不能超过 ${(maxBytes / 1048576).round()} MB');
+      return;
+    }
+    final local = VideoContent(
+      key: '',
+      mime: mime,
+      size: size,
+      durationMs: durationMs,
+      width: width,
+      height: height,
+      posterKey: posterKey,
+    );
+    final m = _addPending(id, msgVideo, local.encode(), replyToSeq);
+    _localMedia[m.clientMsgId] = file;
+    await _uploadAndSend(m);
+  }
+
+  /// 文件：原样上传（带进度），文件名以调用方给定的为准
+  Future<void> sendFileMessage(int id, File file, {required String name, required String mime, int? replyToSeq}) async {
+    if (me == null) return;
+    final size = await file.length();
+    final maxBytes = config.fileMaxBytes ?? 104857600;
+    if (size > maxBytes) {
+      showToast('文件不能超过 ${(maxBytes / 1048576).round()} MB');
+      return;
+    }
+    final clean = name.replaceAll(RegExp(r'[/\\\x00-\x1f]'), '').trim();
+    final local = FileContent(key: '', mime: mime, size: size, name: clean.isEmpty ? 'file' : clean);
+    final m = _addPending(id, msgFile, local.encode(), replyToSeq);
+    _localMedia[m.clientMsgId] = file;
+    await _uploadAndSend(m);
+  }
+
+  Future<void> _uploadMediaAndSend(Message m) async {
+    final file = _localMedia[m.clientMsgId];
+    final isVideo = m.msgType == msgVideo;
+    final vc = isVideo ? VideoContent.of(m) : null;
+    final fc = isVideo ? null : FileContent.of(m);
+    if ((isVideo && vc == null) || (!isVideo && fc == null)) return _failPending(m.clientMsgId);
+    var cur = m;
+    final keyEmpty = isVideo ? vc!.key.isEmpty : fc!.key.isEmpty;
+    if (keyEmpty) {
+      if (file == null || !await file.exists()) return _failPending(m.clientMsgId);
+      try {
+        final pre = isVideo
+            ? await api.presignVideo(
+                mime: vc!.mime, size: vc.size, durationMs: vc.durationMs, width: vc.width, height: vc.height)
+            : await api.presignFile(mime: fc!.mime, size: fc.size, name: fc.name);
+        uploadProgress[m.clientMsgId] = 0;
+        _notify();
+        await api.uploadFile(pre, file, onProgress: (p) {
+          uploadProgress[m.clientMsgId] = p;
+          _notify();
+        });
+        uploadProgress.remove(m.clientMsgId);
+        final content = isVideo ? vc!.withKey(pre.key).encode() : fc!.withKey(pre.key).encode();
+        cur = m.copyWith(content: content);
+        _updatePending(m.clientMsgId, (p) => p.copyWith(content: content));
+      } catch (e) {
+        uploadProgress.remove(m.clientMsgId);
+        showToast(e is ApiError ? e.message : (isVideo ? '视频上传失败' : '文件上传失败'));
+        return _failPending(m.clientMsgId);
+      }
+    }
+    _transmit(cur);
+  }
+
   void retry(Message m) {
     _updatePending(m.clientMsgId, (p) => p.copyWith(status: MsgStatus.sending));
     final cur = threads[m.conversationId]?.pending.where((p) => p.clientMsgId == m.clientMsgId).firstOrNull ?? m;
-    if (cur.msgType == msgVoice || cur.msgType == msgImage) {
+    if (cur.msgType == msgVoice || cur.msgType == msgImage || cur.msgType == msgVideo || cur.msgType == msgFile) {
       _uploadAndSend(cur);
     } else {
       _transmit(cur);
@@ -777,6 +897,8 @@ class ChatStore extends ChangeNotifier {
     _timers.remove(m.clientMsgId)?.cancel();
     if (m.msgType == msgVoice && (VoiceContent.of(m)?.key ?? '').isEmpty) return; // 还没上传完
     if (m.msgType == msgImage && (ImageContent.of(m)?.key ?? '').isEmpty) return;
+    if (m.msgType == msgVideo && (VideoContent.of(m)?.key ?? '').isEmpty) return;
+    if (m.msgType == msgFile && (FileContent.of(m)?.key ?? '').isEmpty) return;
     final ok = socket.send(
       'send',
       {
@@ -804,6 +926,8 @@ class ChatStore extends ChangeNotifier {
     if (f != null) f.delete().catchError((_) => f);
     final fi = _localImage.remove(m.clientMsgId);
     if (fi != null) fi.delete().catchError((_) => fi);
+    _localMedia.remove(m.clientMsgId); // 文件/视频源文件是用户文件，不删原件
+    uploadProgress.remove(m.clientMsgId);
     final t = threads[m.conversationId];
     if (t != null) t.pending = t.pending.where((p) => p.clientMsgId != m.clientMsgId).toList();
     _notify();
@@ -838,6 +962,23 @@ class ChatStore extends ChangeNotifier {
       }
     }
     _localImage.remove(m.clientMsgId);
+    // 自己发的文件/视频：本地文件移入下载缓存，气泡可直接打开（只拷不删原件）
+    final fm = _localMedia.remove(m.clientMsgId);
+    if (fm != null && (m.msgType == msgFile || m.msgType == msgVideo)) {
+      final cache = m.msgType == msgFile ? _fileCache : _videoCache;
+      if (cache != null) {
+        try {
+          final name = FileContent.of(m)?.name ?? '';
+          final mime = m.msgType == msgFile ? (FileContent.of(m)?.mime ?? '') : (VideoContent.of(m)?.mime ?? '');
+          final tmpDir = await getTemporaryDirectory();
+          final tmpCopy = await fm.copy(pathlib.join(tmpDir.path, 'imchat_media_${_uuid.v4()}'));
+          final dst = await cache.adopt(m.conversationId, m.seq, mime, tmpCopy, name);
+          _localMedia['${m.msgType == msgFile ? 'file' : 'video'}:${m.conversationId}:${m.seq}'] = dst;
+        } catch (e) {
+          debugPrint('save media: $e');
+        }
+      }
+    }
     _ingest(m, true);
   }
 
@@ -941,6 +1082,7 @@ class ChatStore extends ChangeNotifier {
       m.seq > 0 &&
       !m.recalled &&
       m.msgType != msgSystem &&
+      m.msgType != msgCall &&
       DateTime.now().difference(m.createdAt).inMilliseconds < config.recallSeconds * 1000 - 1500;
 
   void recall(Message m) {
@@ -1100,6 +1242,83 @@ class ChatStore extends ChangeNotifier {
     return null;
   }
 
+  // ---------- 文件 / 视频下载缓存 ----------
+
+  String _mediaKeyOf(Message m) => '${m.msgType == msgFile ? 'file' : 'video'}:${m.conversationId}:${m.seq}';
+
+  /// 文件气泡点击时调用：已下载直接返回本地文件，未下载走 /media 短期 URL 拉取并落缓存。
+  /// 发送中（seq=0）时返回本地待发送文件。
+  Future<File?> mediaFile(Message m) async {
+    if (m.seq == 0) return _localMedia[m.clientMsgId];
+    final k = _mediaKeyOf(m);
+    final hit = _localMedia[k];
+    if (hit != null && await hit.exists()) return hit;
+    final cache = m.msgType == msgFile ? _fileCache : _videoCache;
+    if (cache == null) return null;
+    final name = FileContent.of(m)?.name ?? '';
+    final found = await cache.find(m.conversationId, m.seq);
+    if (found != null) {
+      _localMedia[k] = found;
+      return found;
+    }
+    final info = await api.media(m.conversationId, m.seq);
+    final (status, bytes) = await api.download(info.url);
+    if (status == 410 || status == 404 || status == 403) {
+      throw ApiError(status, 'expired', '文件已过期');
+    }
+    if (status < 200 || status >= 300) throw ApiError(status, 'download', '下载失败 ($status)');
+    final f = await cache.put(m.conversationId, m.seq, info.mime, bytes, name);
+    _localMedia[k] = f;
+    unawaited(cache.prune(500 * 1024 * 1024));
+    return f;
+  }
+
+  File? mediaFileSync(Message m) => m.seq == 0 ? _localMedia[m.clientMsgId] : _localMedia[_mediaKeyOf(m)];
+
+  // ---------- 资料 / 密码（v0.4.0） ----------
+
+  void _onUserUpdated(User u) {
+    if (u.id == 0) return;
+    users[u.id] = u;
+    if (u.id == me?.id) me = u;
+    for (final id in convs.keys.toList()) {
+      final c = convs[id]!;
+      var next = c;
+      if (c.peer?.id == u.id) next = next.copyWith(peer: u);
+      if (c.membersPreview.any((x) => x.id == u.id)) {
+        next = next.copyWith(membersPreview: [for (final x in next.membersPreview) x.id == u.id ? u : x]);
+      }
+      if (!identical(next, c)) convs[id] = next;
+    }
+    _notify();
+  }
+
+  Future<void> updateNickname(String nickname) async {
+    final u = await api.patchMe(nickname: nickname.trim());
+    _onUserUpdated(u);
+  }
+
+  /// 头像：裁正方形 512 → presign(kind=avatar) → patchMe(avatar_key)
+  Future<void> updateAvatar(Uint8List raw) async {
+    final img = await prepareAvatar(raw);
+    final pre = await api.presignAvatar(mime: img.mime, size: img.bytes.length);
+    await api.upload(pre, img.bytes);
+    final u = await api.patchMe(avatarKey: pre.key);
+    _onUserUpdated(u);
+  }
+
+  /// 修改密码：成功后用返回的新 token 替换本地登录态（其他设备已被服务端踢下线）
+  Future<void> changePassword(String oldPassword, String newPassword) async {
+    final r = await api.changePassword(oldPassword, newPassword);
+    await settings.setToken(r.token);
+    api.token = r.token;
+    me = r.user;
+    _addUsers([r.user]);
+    _notify();
+  }
+
+  Future<void> forgotPassword(String email) => api.forgotPassword(email.trim());
+
   /// 撤回 / 删除：清理语音、图片、转写结果的本地副本
   void _forgetMedia(int cid, int seq) {
     final k = VoiceCache.key(cid, seq);
@@ -1110,6 +1329,10 @@ class ChatStore extends ChangeNotifier {
     _localImage.remove(ik);
     images.remove(ik);
     _imgCache?.delete(cid, seq);
+    _localMedia.remove('file:$cid:$seq');
+    _localMedia.remove('video:$cid:$seq');
+    _fileCache?.delete(cid, seq);
+    _videoCache?.delete(cid, seq);
     if (transcripts.remove(k) != null || settings.transcript(cid, seq) != null) {
       settings.removeTranscript(cid, seq);
     }

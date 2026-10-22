@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:image_picker/image_picker.dart';
 import 'package:provider/provider.dart';
 
 import '../api.dart';
@@ -171,6 +172,208 @@ class _NewChatDialogState extends State<NewChatDialog> {
   }
 }
 
+/// 编辑资料：头像（选图裁正方形 512 后直传）与昵称（SPEC v0.4.0 §3）
+class ProfileDialog extends StatefulWidget {
+  const ProfileDialog({super.key});
+  @override
+  State<ProfileDialog> createState() => _ProfileDialogState();
+}
+
+class _ProfileDialogState extends State<ProfileDialog> {
+  late final TextEditingController _nick =
+      TextEditingController(text: context.read<ChatStore>().me?.nickname ?? '');
+  String _error = '';
+  bool _busy = false;
+  bool _avatarBusy = false;
+
+  @override
+  void dispose() {
+    _nick.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickAvatar() async {
+    final store = context.read<ChatStore>();
+    XFile? xf;
+    try {
+      xf = await ImagePicker().pickImage(source: ImageSource.gallery);
+    } catch (_) {
+      store.showToast('无法打开图片选择');
+      return;
+    }
+    if (xf == null) return;
+    setState(() => _avatarBusy = true);
+    try {
+      final bytes = await xf.readAsBytes();
+      await store.updateAvatar(bytes);
+      store.showToast('头像已更新');
+    } catch (e) {
+      if (mounted) {
+        setState(() => _error = e is ApiError && e.status == 404 ? '服务端不支持修改资料' : errText(e));
+      }
+    } finally {
+      if (mounted) setState(() => _avatarBusy = false);
+    }
+  }
+
+  Future<void> _save() async {
+    final store = context.read<ChatStore>();
+    final nick = _nick.text.trim();
+    if (nick.isEmpty) {
+      setState(() => _error = '昵称不能为空');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      await store.updateNickname(nick);
+      if (mounted) Navigator.pop(context);
+      store.showToast('资料已更新');
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = e is ApiError && e.status == 404 ? '服务端不支持修改资料' : errText(e);
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final me = context.watch<ChatStore>().me;
+    return AlertDialog(
+      title: const Text('编辑资料'),
+      content: SizedBox(
+        width: 360,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          GestureDetector(
+            onTap: _avatarBusy ? null : _pickAvatar,
+            child: Stack(alignment: Alignment.bottomRight, children: [
+              UserAvatar(user: me, size: 84),
+              Container(
+                padding: const EdgeInsets.all(5),
+                decoration: BoxDecoration(color: Theme.of(context).colorScheme.primary, shape: BoxShape.circle),
+                child: _avatarBusy
+                    ? const SizedBox(width: 14, height: 14, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white))
+                    : const Icon(Icons.camera_alt, size: 14, color: Colors.white),
+              ),
+            ]),
+          ),
+          const SizedBox(height: 6),
+          Text('点击更换头像', style: Theme.of(context).textTheme.bodySmall),
+          const SizedBox(height: 16),
+          TextField(
+            controller: _nick,
+            maxLength: 64,
+            decoration: InputDecoration(
+              labelText: '昵称',
+              border: const OutlineInputBorder(),
+              errorText: _error.isEmpty ? null : _error,
+            ),
+            onChanged: (_) => _error.isEmpty ? null : setState(() => _error = ''),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(onPressed: _busy ? null : _save, child: const Text('保存')),
+      ],
+    );
+  }
+}
+
+/// 修改密码（SPEC v0.4.0 §4.4）：成功后当前设备换新 token 无感续用
+class ChangePasswordDialog extends StatefulWidget {
+  const ChangePasswordDialog({super.key});
+  @override
+  State<ChangePasswordDialog> createState() => _ChangePasswordDialogState();
+}
+
+class _ChangePasswordDialogState extends State<ChangePasswordDialog> {
+  final _old = TextEditingController();
+  final _new = TextEditingController();
+  final _confirm = TextEditingController();
+  String _error = '';
+  bool _busy = false;
+
+  @override
+  void dispose() {
+    _old.dispose();
+    _new.dispose();
+    _confirm.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    final store = context.read<ChatStore>();
+    if (_new.text.length < 8 || _new.text.length > 72) {
+      setState(() => _error = '新密码需为 8~72 位');
+      return;
+    }
+    if (_new.text != _confirm.text) {
+      setState(() => _error = '两次输入的新密码不一致');
+      return;
+    }
+    setState(() {
+      _busy = true;
+      _error = '';
+    });
+    try {
+      await store.changePassword(_old.text, _new.text);
+      if (mounted) Navigator.pop(context);
+      store.showToast('密码已修改，其他设备已退出登录');
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _busy = false;
+          _error = e is ApiError ? e.message : '修改失败';
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('修改密码'),
+      content: SizedBox(
+        width: 360,
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          TextField(
+            controller: _old,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: '当前密码', border: OutlineInputBorder()),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _new,
+            obscureText: true,
+            decoration: const InputDecoration(labelText: '新密码（8~72 位）', border: OutlineInputBorder()),
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _confirm,
+            obscureText: true,
+            onSubmitted: (_) => _submit(),
+            decoration: InputDecoration(
+              labelText: '确认新密码',
+              border: const OutlineInputBorder(),
+              errorText: _error.isEmpty ? null : _error,
+            ),
+          ),
+        ]),
+      ),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
+        FilledButton(onPressed: _busy ? null : _submit, child: const Text('修改')),
+      ],
+    );
+  }
+}
+
 /// 主题与账号
 class SettingsSheet extends StatelessWidget {
   const SettingsSheet({super.key});
@@ -214,6 +417,22 @@ class SettingsSheet extends StatelessWidget {
                   ? '跟随系统壁纸 / 强调色（Material You）；系统不支持时使用默认紫色。'
                   : 'Material 3 配色，由所选主题色生成。',
               style: tt.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
+          const SizedBox(height: 16),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.person_outline),
+            title: const Text('编辑资料'),
+            subtitle: const Text('头像与昵称'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showDialog<void>(context: context, builder: (_) => const ProfileDialog()),
+          ),
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: const Icon(Icons.lock_outline),
+            title: const Text('修改密码'),
+            trailing: const Icon(Icons.chevron_right),
+            onTap: () => showDialog<void>(context: context, builder: (_) => const ChangePasswordDialog()),
+          ),
           const SizedBox(height: 24),
           OutlinedButton.icon(
             icon: const Icon(Icons.logout),

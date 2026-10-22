@@ -61,6 +61,22 @@ PreparedImage prepareImageSync(Uint8List bytes) {
   return PreparedImage(img.encodeJpg(image, quality: jpegQuality), 'image/jpeg', image.width, image.height);
 }
 
+/// 头像（SPEC v0.4.0 §3.2）：居中裁正方形，长边 512，JPEG 质量 85
+Future<PreparedImage> prepareAvatar(Uint8List bytes) => Isolate.run(() => prepareAvatarSync(bytes));
+
+PreparedImage prepareAvatarSync(Uint8List bytes) {
+  final decoded = img.decodeImage(bytes);
+  if (decoded == null) throw const ImagePrepException('不支持的图片格式');
+  var image = img.bakeOrientation(decoded);
+  final side = image.width < image.height ? image.width : image.height;
+  image = img.copyCrop(image, x: (image.width - side) ~/ 2, y: (image.height - side) ~/ 2, width: side, height: side);
+  if (side > 512) {
+    image = img.copyResize(image, width: 512, height: 512, interpolation: img.Interpolation.average);
+  }
+  if (image.hasAlpha) image = image.convert(numChannels: 3);
+  return PreparedImage(img.encodeJpg(image, quality: 85), 'image/jpeg', image.width, image.height);
+}
+
 bool _hasTransparency(img.Image image) {
   if (!image.hasAlpha) return false;
   final max = image.maxChannelValue;

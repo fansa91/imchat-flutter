@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
@@ -178,6 +180,78 @@ class Api {
 
   Future<MediaInfo> media(int cid, int seq) async =>
       MediaInfo.fromJson(_map(await _req('GET', '/api/conversations/$cid/messages/$seq/media')));
+
+  // v0.4.0
+  Future<PresignResult> presignVideo({
+    required String mime,
+    required int size,
+    required int durationMs,
+    required int width,
+    required int height,
+  }) async =>
+      PresignResult.fromJson(_map(await _req('POST', '/api/uploads/presign', body: {
+        'kind': 'video',
+        'mime': mime,
+        'size': size,
+        'duration_ms': durationMs,
+        'width': width,
+        'height': height,
+      })));
+
+  Future<PresignResult> presignFile({required String mime, required int size, required String name}) async =>
+      PresignResult.fromJson(_map(await _req('POST', '/api/uploads/presign',
+          body: {'kind': 'file', 'mime': mime, 'size': size, 'name': name})));
+
+  Future<PresignResult> presignAvatar({required String mime, required int size}) async =>
+      PresignResult.fromJson(
+          _map(await _req('POST', '/api/uploads/presign', body: {'kind': 'avatar', 'mime': mime, 'size': size})));
+
+  /// 通话 ICE 配置：服务端透传 Cloudflare 的 iceServers，不落盘
+  Future<Map<String, dynamic>> iceServers() async => _map(await _req('GET', '/api/calls/ice-servers'));
+
+  Future<User> patchMe({String? nickname, String? avatarKey}) async =>
+      User.fromJson(_map(await _req('PATCH', '/api/me', body: {
+        'nickname': ?nickname,
+        'avatar_key': ?avatarKey,
+      })));
+
+  /// 修改密码：成功后返回新 token（当前设备无感续用，其他设备被踢）
+  Future<AuthResult> changePassword(String oldPassword, String newPassword) async => AuthResult.fromJson(
+      _map(await _req('POST', '/api/me/password', body: {'old_password': oldPassword, 'new_password': newPassword})));
+
+  /// 忘记密码：无需登录。服务端未启用时抛 ApiError(code: reset_disabled, 501)
+  Future<void> forgotPassword(String email) async {
+    final anon = Api(server: server, client: _client);
+    await anon._req('POST', '/api/password/forgot', body: {'email': email});
+  }
+
+  /// 流式上传本地文件到预签名 URL，[onProgress] 回调 0.0~1.0
+  Future<void> uploadFile(PresignResult pre, File file, {void Function(double p)? onProgress}) async {
+    final total = await file.length();
+    final req = http.StreamedRequest(pre.method.isEmpty ? 'PUT' : pre.method, Uri.parse(pre.url));
+    req.headers.addAll(pre.headers);
+    req.contentLength = total;
+    var sent = 0;
+    final sub = file.openRead().listen(
+      (chunk) {
+        req.sink.add(chunk);
+        sent += chunk.length;
+        if (total > 0) onProgress?.call((sent / total).clamp(0.0, 1.0));
+      },
+      onDone: () => req.sink.close(),
+      onError: (Object e) => req.sink.addError(e),
+      cancelOnError: true,
+    );
+    try {
+      final streamed = await _client.send(req).timeout(const Duration(minutes: 10));
+      final res = await http.Response.fromStream(streamed);
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        throw ApiError(res.statusCode, 'upload', '上传失败 (${res.statusCode})');
+      }
+    } finally {
+      await sub.cancel();
+    }
+  }
 
   /// 直传到对象存储（预签名 URL，不带 Authorization）
   Future<void> upload(PresignResult pre, Uint8List bytes) async {

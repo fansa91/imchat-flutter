@@ -1,7 +1,42 @@
-import 'package:flutter/material.dart';
+import 'dart:typed_data';
 
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'package:provider/provider.dart';
+
+import '../api.dart';
 import '../models.dart';
+import '../store.dart';
 import '../util.dart';
+
+/// 头像图片内存缓存：完整 URL -> 字节（URL 带 ?v= 版本参数，变更即自然失效）
+final Map<String, Uint8List> _avatarBytes = {};
+final Map<String, Future<Uint8List?>> _avatarPending = {};
+
+Future<Uint8List?> _fetchAvatar(String url, String token) {
+  final hit = _avatarBytes[url];
+  if (hit != null) return Future.value(hit);
+  return _avatarPending.putIfAbsent(url, () async {
+    try {
+      final res = await http.get(Uri.parse(url), headers: token.isEmpty ? null : {'Authorization': 'Bearer $token'});
+      if (res.statusCode < 200 || res.statusCode >= 300) return null;
+      _avatarBytes[url] = res.bodyBytes;
+      return res.bodyBytes;
+    } catch (_) {
+      return null;
+    } finally {
+      _avatarPending.remove(url);
+    }
+  });
+}
+
+/// 服务端拼装的相对头像路径（/api/users/{id}/avatar?v=...）需拼服务器 base
+String? resolveAvatarUrl(String server, String avatarUrl) {
+  if (avatarUrl.isEmpty) return null;
+  if (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) return avatarUrl;
+  final base = Uri.parse(normalizeServer(server));
+  return base.replace(path: '${base.path}$avatarUrl').toString();
+}
 
 /// 根据用户 ID 选一组 M3 容器色作为头像底色
 (Color, Color) avatarColors(ColorScheme cs, int id) => switch (id % 3) {
@@ -18,7 +53,7 @@ class UserAvatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final (bg, fg) = avatarColors(Theme.of(context).colorScheme, user?.id ?? 0);
-    return Container(
+    final fallback = Container(
       width: size,
       height: size,
       alignment: Alignment.center,
@@ -27,6 +62,22 @@ class UserAvatar extends StatelessWidget {
         initialOf(displayName(user)),
         style: TextStyle(color: fg, fontSize: size * 0.42, fontWeight: FontWeight.w500),
       ),
+    );
+    final url = user?.avatarUrl ?? '';
+    if (url.isEmpty) return fallback;
+    final store = context.read<ChatStore>();
+    final full = resolveAvatarUrl(store.api.server, url);
+    if (full == null) return fallback;
+    // 带 Authorization 头拉取（服务端 302 到预签名地址，http 自动跟随重定向）
+    return FutureBuilder<Uint8List?>(
+      future: _fetchAvatar(full, store.api.token),
+      builder: (context, snap) {
+        final bytes = snap.data ?? _avatarBytes[full];
+        if (bytes == null) return fallback;
+        return ClipOval(
+          child: Image.memory(bytes, width: size, height: size, fit: BoxFit.cover, gaplessPlayback: true),
+        );
+      },
     );
   }
 }

@@ -59,6 +59,61 @@ class _LoginPageState extends State<LoginPage> {
     if (picked != null && mounted) await context.read<Settings>().setServer(picked);
   }
 
+  /// 忘记密码（SPEC v0.4.0 §4.4）：登录前拿不到 /api/config（需登录），
+  /// 故入口默认显示；服务端未启用时 forgot 返回 501/reset_disabled，再明确提示。
+  Future<void> _forgotPassword() async {
+    final store = context.read<ChatStore>();
+    final emailCtrl = TextEditingController(text: _email.text.trim());
+    final sent = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('重置密码'),
+        content: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
+          TextField(
+            controller: emailCtrl,
+            keyboardType: TextInputType.emailAddress,
+            autofocus: true,
+            decoration: const InputDecoration(labelText: '注册邮箱', border: OutlineInputBorder()),
+          ),
+          const SizedBox(height: 12),
+          Text('提交后将向该邮箱发送重置链接，请在邮箱中点击链接完成重置，再回 App 用新密码登录。',
+              style: Theme.of(ctx).textTheme.bodySmall),
+        ]),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          FilledButton(
+            onPressed: () async {
+              final email = emailCtrl.text.trim();
+              if (email.isEmpty) return;
+              try {
+                await store.forgotPassword(email);
+                if (ctx.mounted) Navigator.pop(ctx, true);
+              } on ApiError catch (e) {
+                if (ctx.mounted) Navigator.pop(ctx, false);
+                store.showToast(e.code == 'reset_disabled' || e.status == 501 ? '服务器未启用重置密码' : e.message);
+              } catch (_) {
+                if (ctx.mounted) Navigator.pop(ctx, false);
+                store.showToast('发送失败，请稍后再试');
+              }
+            },
+            child: const Text('发送重置邮件'),
+          ),
+        ],
+      ),
+    );
+    emailCtrl.dispose();
+    if (sent == true && mounted) {
+      await showDialog<void>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('请查收邮箱'),
+          content: const Text('如果该邮箱已注册，重置邮件已发送。请在 30 分钟内点击邮件中的链接完成重置。'),
+          actions: [FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('知道了'))],
+        ),
+      );
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final settings = context.watch<Settings>();
@@ -160,6 +215,14 @@ class _LoginPageState extends State<LoginPage> {
                           ? const SizedBox(width: 20, height: 20, child: CircularProgressIndicator(strokeWidth: 2))
                           : Text(_register ? '注册并登录' : '登录'),
                     ),
+                    if (!_register)
+                      Align(
+                        alignment: Alignment.centerRight,
+                        child: TextButton(
+                          onPressed: _busy ? null : _forgotPassword,
+                          child: const Text('忘记密码？'),
+                        ),
+                      ),
                   ],
                 ),
               ),

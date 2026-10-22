@@ -287,6 +287,18 @@ class _ChatViewState extends State<ChatView> {
           ),
         ]),
         actions: [
+          if (!isGroup && store.config.callEnabled) ...[
+            IconButton(
+              tooltip: '语音通话',
+              icon: const Icon(Icons.call_outlined),
+              onPressed: () => store.calls.startCall(id, 'audio'),
+            ),
+            IconButton(
+              tooltip: '视频通话',
+              icon: const Icon(Icons.videocam_outlined),
+              onPressed: () => store.calls.startCall(id, 'video'),
+            ),
+          ],
           if (isGroup) IconButton(tooltip: '群聊信息', icon: const Icon(Icons.info_outline), onPressed: widget.onInfo),
         ],
       ),

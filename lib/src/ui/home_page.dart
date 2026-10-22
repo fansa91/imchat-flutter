@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../store.dart';
+import 'call_page.dart';
 import 'chat_view.dart';
 import 'conversation_list.dart';
 import 'dialogs.dart';
@@ -43,6 +44,17 @@ class _HomePageState extends State<HomePage> {
   @override
   Widget build(BuildContext context) {
     final store = context.watch<ChatStore>();
+    // 通话中/来电时全屏覆盖（通话状态在 CallManager 里，单独监听）
+    return ListenableBuilder(
+      listenable: store.calls,
+      builder: (context, _) => Stack(children: [
+        _buildMain(context, store),
+        if (store.calls.active) const Positioned.fill(child: CallPage()),
+      ]),
+    );
+  }
+
+  Widget _buildMain(BuildContext context, ChatStore store) {
     // 会话已不存在（退群 / 被移出）
     if (_selected != null && !store.convs.containsKey(_selected)) {
       WidgetsBinding.instance.addPostFrameCallback((_) {

@@ -69,6 +69,39 @@ String systemText(Message m, int? meId) {
   return p.text.isNotEmpty ? p.text : '[系统消息]';
 }
 
+/// 文件大小展示
+String fmtBytes(int n) {
+  if (n < 1024) return '$n B';
+  if (n < 1024 * 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+  if (n < 1024 * 1024 * 1024) return '${(n / 1048576).toStringAsFixed(1)} MB';
+  return '${(n / 1073741824).toStringAsFixed(2)} GB';
+}
+
+/// 通话时长 mm:ss（超过 1 小时带小时）
+String fmtCallDuration(int ms) {
+  final s = (ms / 1000).floor();
+  final mm = (s % 3600) ~/ 60;
+  final ss = s % 60;
+  String two(int v) => v.toString().padLeft(2, '0');
+  return s >= 3600 ? '${s ~/ 3600}:${two(mm)}:${two(ss)}' : '${two(mm)}:${two(ss)}';
+}
+
+/// 通话记录的展示文案（SPEC v0.4.0 §1.4），解析失败时兜底
+String callText(Message m) {
+  final c = CallContent.of(m);
+  if (c == null) return '[通话]';
+  final kind = c.isVideo ? '视频通话' : '语音通话';
+  return switch (c.outcome) {
+    'completed' => '$kind ${fmtCallDuration(c.durationMs)}',
+    'missed' => '$kind 未接听',
+    'rejected' => '$kind 对方已拒绝',
+    'cancelled' => '$kind 已取消',
+    'busy' => '$kind 对方忙线',
+    'failed' => '$kind 连接失败',
+    _ => '[$kind]',
+  };
+}
+
 /// 会话列表 / 引用里的单行预览
 String previewOf(Message m, int? meId, String Function(int id) senderName) {
   if (m.recalled) return '${m.senderId == meId ? '你' : senderName(m.senderId)}撤回了一条消息';
@@ -76,6 +109,13 @@ String previewOf(Message m, int? meId, String Function(int id) senderName) {
   if (m.msgType == msgText) return m.content;
   if (m.msgType == msgVoice) return '[语音]';
   if (m.msgType == msgImage) return '[图片]';
+  if (m.msgType == msgVideo) return '[视频]';
+  if (m.msgType == msgFile) {
+    final f = FileContent.of(m);
+    final name = f?.name ?? '';
+    return name.isEmpty ? '[文件]' : '[文件] $name';
+  }
+  if (m.msgType == msgCall) return '[${CallContent.of(m)?.isVideo == true ? '视频通话' : '语音通话'}]';
   return unsupportedText;
 }
 
@@ -87,6 +127,9 @@ String shortPreview(Message m) => switch (m.msgType) {
       msgText => m.content,
       msgVoice => '[语音]',
       msgImage => '[图片]',
+      msgVideo => '[视频]',
+      msgFile => '[文件]',
+      msgCall => '[通话]',
       _ => '[消息]',
     };
 
