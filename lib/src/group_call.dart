@@ -290,6 +290,25 @@ class GroupCallManager extends ChangeNotifier {
     if (tracks.isEmpty) return;
     final offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
+    // 发布本地轨道必须带每条轨道在 offer 中对应 m-line 的 mid，缺了
+    // Cloudflare 回 406 invalid_params「Missing mid in track」（v0.5.2 修）
+    try {
+      final midByKind = <String, String>{};
+      for (final t in await pc.getTransceivers()) {
+        final track = t.sender.track;
+        final mid = t.mid;
+        final k = track?.kind;
+        if (track != null && mid.isNotEmpty && k != null && k.isNotEmpty) {
+          midByKind[k] = mid;
+        }
+      }
+      for (final t in tracks) {
+        final m = midByKind[t['kind']];
+        if (m != null) t['mid'] = m;
+      }
+    } catch (e) {
+      debugPrint('collect track mids failed: $e');
+    }
     final res = await store.api.publishTracks(callId!, {'type': offer.type ?? 'offer', 'sdp': offer.sdp ?? ''}, tracks);
     _registerPublishResult(res);
     if (res.sessionDescription != null && res.sdType == 'answer') {
