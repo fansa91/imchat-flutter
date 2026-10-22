@@ -4,10 +4,8 @@ import 'package:provider/provider.dart';
 
 import '../api.dart';
 import '../models.dart';
-import '../settings.dart';
 import '../store.dart';
 import '../theme.dart';
-import '../util.dart';
 import 'avatar.dart';
 
 String errText(Object e) => e is ApiError && e.status == 404
@@ -55,6 +53,21 @@ class _NewChatDialogState extends State<NewChatDialog> {
       _email.clear();
     } catch (e) {
       _error = errText(e);
+    }
+    if (mounted) setState(() => _busy = false);
+  }
+
+  /// 单聊模式点好友直接开聊（v0.5.0 好友快捷入口）
+  Future<void> _chatWithFriend(User u) async {
+    if (_busy) return;
+    final store = context.read<ChatStore>();
+    final nav = Navigator.of(context);
+    setState(() => _busy = true);
+    try {
+      final id = await store.startChatWithUser(u.id);
+      nav.pop(id);
+    } catch (e) {
+      if (mounted) setState(() => _error = errText(e));
     }
     if (mounted) setState(() => _busy = false);
   }
@@ -153,10 +166,39 @@ class _NewChatDialogState extends State<NewChatDialog> {
                 for (final u in _picked)
                   InputChip(
                     avatar: UserAvatar(user: u, size: 24),
-                    label: Text(displayName(u)),
+                    label: Text(context.read<ChatStore>().displayOf(u)),
                     onDeleted: () => setState(() => _picked.removeWhere((p) => p.id == u.id)),
                   ),
               ]),
+            ],
+            // v0.5.0：好友快捷选择（建群选人时好友置顶；单聊点好友直接开聊）
+            if (context.watch<ChatStore>().friends.isNotEmpty) ...[
+              const SizedBox(height: 16),
+              Align(
+                alignment: Alignment.centerLeft,
+                child: Text('我的好友', style: Theme.of(context).textTheme.titleSmall),
+              ),
+              const SizedBox(height: 4),
+              if (_group)
+                Wrap(spacing: 8, runSpacing: 4, children: [
+                  for (final f in context.watch<ChatStore>().friends)
+                    if (!_picked.any((p) => p.id == f.user.id))
+                      ActionChip(
+                        avatar: UserAvatar(user: f.user, size: 24),
+                        label: Text(context.read<ChatStore>().displayOf(f.user)),
+                        onPressed: _busy ? null : () => setState(() => _picked.add(f.user)),
+                      ),
+                ])
+              else
+                for (final f in context.watch<ChatStore>().friends)
+                  ListTile(
+                    dense: true,
+                    contentPadding: EdgeInsets.zero,
+                    leading: UserAvatar(user: f.user, size: 36),
+                    title: Text(context.read<ChatStore>().displayOf(f.user)),
+                    subtitle: f.online ? const Text('在线') : null,
+                    onTap: _busy ? null : () => _chatWithFriend(f.user),
+                  ),
             ],
           ]),
         ),
@@ -374,83 +416,9 @@ class _ChangePasswordDialogState extends State<ChangePasswordDialog> {
   }
 }
 
-/// 主题与账号
-class SettingsSheet extends StatelessWidget {
-  const SettingsSheet({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    final settings = context.watch<Settings>();
-    final store = context.read<ChatStore>();
-    final me = store.me;
-    final tt = Theme.of(context).textTheme;
-    return SafeArea(
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-        child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: UserAvatar(user: me, size: 48),
-            title: Text(displayName(me), style: tt.titleMedium),
-            subtitle: Text('${me?.email ?? ''}\n${settings.server}'),
-            isThreeLine: true,
-          ),
-          const SizedBox(height: 8),
-          Text('主题', style: tt.titleSmall),
-          const SizedBox(height: 8),
-          SegmentedButton<ThemeMode>(
-            segments: const [
-              ButtonSegment(value: ThemeMode.light, label: Text('浅色'), icon: Icon(Icons.light_mode_outlined)),
-              ButtonSegment(value: ThemeMode.dark, label: Text('深色'), icon: Icon(Icons.dark_mode_outlined)),
-              ButtonSegment(value: ThemeMode.system, label: Text('跟随系统'), icon: Icon(Icons.brightness_auto_outlined)),
-            ],
-            selected: {settings.themeMode},
-            onSelectionChanged: (s) => settings.setThemeMode(s.first),
-          ),
-          const SizedBox(height: 16),
-          Text('主题色', style: tt.titleSmall),
-          const SizedBox(height: 8),
-          _SeedPicker(value: settings.seed, onChanged: settings.setSeed),
-          const SizedBox(height: 8),
-          Text(
-              settings.seed == seedSystem
-                  ? '跟随系统壁纸 / 强调色（Material You）；系统不支持时使用默认紫色。'
-                  : 'Material 3 配色，由所选主题色生成。',
-              style: tt.bodySmall?.copyWith(color: Theme.of(context).colorScheme.onSurfaceVariant)),
-          const SizedBox(height: 16),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.person_outline),
-            title: const Text('编辑资料'),
-            subtitle: const Text('头像与昵称'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => showDialog<void>(context: context, builder: (_) => const ProfileDialog()),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.lock_outline),
-            title: const Text('修改密码'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => showDialog<void>(context: context, builder: (_) => const ChangePasswordDialog()),
-          ),
-          const SizedBox(height: 24),
-          OutlinedButton.icon(
-            icon: const Icon(Icons.logout),
-            label: const Text('退出登录'),
-            onPressed: () {
-              Navigator.pop(context);
-              store.logout();
-            },
-          ),
-        ]),
-      ),
-    );
-  }
-}
-
-/// 主题色选择：跟随系统 + 8 个种子色（与网页端相同）
-class _SeedPicker extends StatelessWidget {
-  const _SeedPicker({required this.value, required this.onChanged});
+/// 主题色选择：跟随系统 + 8 个种子色（与网页端相同）；v0.5.0 起在「我的」页使用
+class SeedPicker extends StatelessWidget {
+  const SeedPicker({super.key, required this.value, required this.onChanged});
   final String value;
   final ValueChanged<String> onChanged;
 

@@ -129,7 +129,7 @@ class _GroupInfoPageState extends State<GroupInfoPage> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ListTile(
             leading: UserAvatar(user: m.user),
-            title: Text(displayName(m.user)),
+            title: Text(store.displayOf(m.user)),
             subtitle: Text(m.user.email),
           ),
           if (canRole)
@@ -181,7 +181,7 @@ class _GroupInfoPageState extends State<GroupInfoPage> {
           const SizedBox(height: 8),
           Center(child: ConvAvatar(conv: conv, size: 72)),
           const SizedBox(height: 8),
-          Center(child: Text(convTitle(conv), style: tt.titleLarge)),
+          Center(child: Text(convTitle(conv, store.friendRemarks), style: tt.titleLarge)),
           const SizedBox(height: 8),
           ListTile(
             leading: const Icon(Icons.edit_outlined),
@@ -251,7 +251,7 @@ class _GroupInfoPageState extends State<GroupInfoPage> {
                   ? OnlineDot(size: 40, child: UserAvatar(user: m.user))
                   : UserAvatar(user: m.user),
               title: Row(children: [
-                Flexible(child: Text(m.user.id == meId ? '${displayName(m.user)}（我）' : displayName(m.user), overflow: TextOverflow.ellipsis)),
+                Flexible(child: Text(m.user.id == meId ? '${store.displayOf(m.user)}（我）' : store.displayOf(m.user), overflow: TextOverflow.ellipsis)),
                 if (m.role > 0) ...[
                   const SizedBox(width: 8),
                   Container(

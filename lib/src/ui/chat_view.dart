@@ -146,7 +146,7 @@ class _ChatViewState extends State<ChatView> {
       idleSubtitle = conv?.peer?.email ?? '';
     }
     final subtitle = typingOn
-        ? (isGroup ? '${displayName(store.users[typing!.uid])} 正在输入…' : '正在输入…')
+        ? (isGroup ? '${store.displayOf(store.users[typing!.uid])} 正在输入…' : '正在输入…')
         : idleSubtitle;
 
     final annAt = conv?.announcementAt?.toUtc().toIso8601String() ?? '';
@@ -247,7 +247,7 @@ class _ChatViewState extends State<ChatView> {
         child: Column(mainAxisSize: MainAxisSize.min, children: [
           ConvAvatar(conv: conv, size: 72),
           const SizedBox(height: 12),
-          Text('和 ${convTitle(conv)} 打个招呼吧', style: TextStyle(color: cs.onSurfaceVariant)),
+          Text('和 ${convTitle(conv, store.friendRemarks)} 打个招呼吧', style: TextStyle(color: cs.onSurfaceVariant)),
         ]),
       );
     } else {
@@ -276,7 +276,7 @@ class _ChatViewState extends State<ChatView> {
           const SizedBox(width: 12),
           Expanded(
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(convTitle(conv), maxLines: 1, overflow: TextOverflow.ellipsis, style: tt.titleMedium),
+              Text(convTitle(conv, store.friendRemarks), maxLines: 1, overflow: TextOverflow.ellipsis, style: tt.titleMedium),
               Text(
                 subtitle,
                 maxLines: 1,
@@ -299,10 +299,47 @@ class _ChatViewState extends State<ChatView> {
               onPressed: () => store.calls.startCall(id, 'video'),
             ),
           ],
+          if (isGroup && store.config.groupCallEnabled) ...[
+            IconButton(
+              tooltip: '语音通话',
+              icon: const Icon(Icons.call_outlined),
+              onPressed: () => store.groupCalls.startRoom(id, 'audio'),
+            ),
+            IconButton(
+              tooltip: '视频通话',
+              icon: const Icon(Icons.videocam_outlined),
+              onPressed: () => store.groupCalls.startRoom(id, 'video'),
+            ),
+          ],
           if (isGroup) IconButton(tooltip: '群聊信息', icon: const Icon(Icons.info_outline), onPressed: widget.onInfo),
         ],
       ),
       body: Column(children: [
+        if (isGroup && store.groupCalls.openRooms[id] != null && !store.groupCalls.inRoom)
+          Material(
+            color: cs.primaryContainer,
+            child: InkWell(
+              onTap: () => store.groupCalls.joinOpenRoom(id),
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                child: Row(children: [
+                  Icon(
+                    store.groupCalls.openRooms[id]!.kind == 'video' ? Icons.videocam : Icons.call,
+                    size: 20,
+                    color: cs.onPrimaryContainer,
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      '通话中 · ${store.groupCalls.openRooms[id]!.count} 人，点击加入',
+                      style: TextStyle(color: cs.onPrimaryContainer, fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                  Icon(Icons.login, size: 18, color: cs.onPrimaryContainer),
+                ]),
+              ),
+            ),
+          ),
         if (showAnn)
           Material(
             color: cs.secondaryContainer,

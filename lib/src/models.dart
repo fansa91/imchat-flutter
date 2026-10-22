@@ -49,7 +49,18 @@ class User {
   final String avatarUrl;
   final DateTime? createdAt;
 
-  const User({required this.id, this.email = '', this.nickname = '', this.avatarUrl = '', this.createdAt});
+  /// 隐私开关「允许通过邮箱 / 用户 ID 找到我」：只有 GET /api/me 等本人视角
+  /// 响应带 allow_find，他人视角（PublicUser）不含此字段，缺省 true（SPEC v0.5.0 §1.2/§2）
+  final bool allowFind;
+
+  const User({
+    required this.id,
+    this.email = '',
+    this.nickname = '',
+    this.avatarUrl = '',
+    this.createdAt,
+    this.allowFind = true,
+  });
 
   factory User.fromJson(Map<String, dynamic> j) => User(
         id: _int(j['id']),
@@ -57,6 +68,7 @@ class User {
         nickname: _str(j['nickname']),
         avatarUrl: _str(j['avatar_url']),
         createdAt: _dateOrNull(j['created_at']),
+        allowFind: j['allow_find'] == null ? true : _bool(j['allow_find']),
       );
 
   Map<String, dynamic> toJson() => {
@@ -65,7 +77,81 @@ class User {
         'nickname': nickname,
         'avatar_url': avatarUrl,
         if (createdAt != null) 'created_at': _iso(createdAt!),
+        'allow_find': allowFind,
       };
+
+  User copyWith({String? nickname, String? avatarUrl, bool? allowFind}) => User(
+        id: id,
+        email: email,
+        nickname: nickname ?? this.nickname,
+        avatarUrl: avatarUrl ?? this.avatarUrl,
+        createdAt: createdAt,
+        allowFind: allowFind ?? this.allowFind,
+      );
+}
+
+/// 与搜索者的关系（GET /api/users/search 的 relation 字段，SPEC v0.5.0 §1.3）
+enum UserRelation { none, friend, pendingOut, pendingIn }
+
+UserRelation relationFrom(String? s) => switch (s) {
+      'friend' => UserRelation.friend,
+      'pending_out' => UserRelation.pendingOut,
+      'pending_in' => UserRelation.pendingIn,
+      _ => UserRelation.none,
+    };
+
+String relationTo(UserRelation r) => switch (r) {
+      UserRelation.friend => 'friend',
+      UserRelation.pendingOut => 'pending_out',
+      UserRelation.pendingIn => 'pending_in',
+      UserRelation.none => 'none',
+    };
+
+/// 用户搜索结果：PublicUser + 关系状态
+class SearchResult {
+  final User user;
+  final UserRelation relation;
+  const SearchResult({required this.user, this.relation = UserRelation.none});
+  factory SearchResult.fromJson(Map<String, dynamic> j) =>
+      SearchResult(user: User.fromJson(j), relation: relationFrom(j['relation']?.toString()));
+}
+
+/// 好友（GET /api/friends 的一项，SPEC v0.5.0 §1.3）：remark 是本人给对方的
+/// 单向备注；online 为服务端 presence 判定
+class Friend {
+  final User user;
+  final String remark;
+  final bool online;
+  final DateTime? createdAt;
+
+  const Friend({required this.user, this.remark = '', this.online = false, this.createdAt});
+
+  factory Friend.fromJson(Map<String, dynamic> j) => Friend(
+        user: User.fromJson((j['user'] as Map<String, dynamic>?) ?? const {}),
+        remark: _str(j['remark']),
+        online: _bool(j['online']),
+        createdAt: _dateOrNull(j['created_at']),
+      );
+
+  Friend copyWith({String? remark, bool? online}) =>
+      Friend(user: user, remark: remark ?? this.remark, online: online ?? this.online, createdAt: createdAt);
+}
+
+/// 好友申请（GET /api/friends/requests 的 incoming / outgoing 一项）
+class FriendRequest {
+  final int id;
+  final User user;
+  final String message;
+  final DateTime? createdAt;
+
+  const FriendRequest({required this.id, required this.user, this.message = '', this.createdAt});
+
+  factory FriendRequest.fromJson(Map<String, dynamic> j) => FriendRequest(
+        id: _int(j['id']),
+        user: User.fromJson((j['user'] as Map<String, dynamic>?) ?? const {}),
+        message: _str(j['message']),
+        createdAt: _dateOrNull(j['created_at']),
+      );
 }
 
 class Reaction {
@@ -405,7 +491,7 @@ class FileContent {
   }
 }
 
-/// 通话记录 content（JSON 字符串，SPEC v0.4.0 §1.4；只能由服务端生成）
+/// 通话记录 content（JSON 字符串，SPEC v0.4.0 §1.4 / v0.5.0 §3.5；只能由服务端生成）
 class CallContent {
   final String callId;
   final String kind; // audio | video
@@ -413,12 +499,22 @@ class CallContent {
   final int durationMs;
   final int callerId;
 
+  /// v0.5.0：single | group；旧记录无此字段按 single 处理
+  final String mode;
+
+  /// v0.5.0 群通话：群成员总数 / 实际加入人数
+  final int participantCount;
+  final int joinedCount;
+
   const CallContent({
     required this.callId,
     this.kind = 'audio',
     this.outcome = '',
     this.durationMs = 0,
     this.callerId = 0,
+    this.mode = 'single',
+    this.participantCount = 0,
+    this.joinedCount = 0,
   });
 
   factory CallContent.fromJson(Map<String, dynamic> j) => CallContent(
@@ -427,6 +523,9 @@ class CallContent {
         outcome: _str(j['outcome']),
         durationMs: _int(j['duration_ms']),
         callerId: _int(j['caller_id']),
+        mode: _str(j['mode']) == 'group' ? 'group' : 'single',
+        participantCount: _int(j['participant_count']),
+        joinedCount: _int(j['joined_count']),
       );
 
   Map<String, dynamic> toJson() => {
@@ -435,11 +534,15 @@ class CallContent {
         'outcome': outcome,
         'duration_ms': durationMs,
         'caller_id': callerId,
+        if (mode == 'group') 'mode': mode,
+        if (participantCount != 0) 'participant_count': participantCount,
+        if (joinedCount != 0) 'joined_count': joinedCount,
       };
 
   String encode() => jsonEncode(toJson());
 
   bool get isVideo => kind == 'video';
+  bool get isGroup => mode == 'group';
 
   static CallContent? of(Message m) {
     if (m.msgType != msgCall) return null;
@@ -677,6 +780,9 @@ class ClientConfig {
   final bool videoEnabled;
   final int? videoMaxBytes;
   final bool passwordResetEnabled;
+  // v0.5.0
+  final bool groupCallEnabled;
+  final int? groupCallMaxParticipants;
 
   const ClientConfig({
     this.recallSeconds = 120,
@@ -697,6 +803,8 @@ class ClientConfig {
     this.videoEnabled = false,
     this.videoMaxBytes,
     this.passwordResetEnabled = false,
+    this.groupCallEnabled = false,
+    this.groupCallMaxParticipants,
   });
 
   static const defaultReactions = ['❤️', '👍', '👎', '😂', '‼️', '❓'];
@@ -720,6 +828,8 @@ class ClientConfig {
         videoEnabled: _bool(j['video_enabled']),
         videoMaxBytes: _intOrNull(j['video_max_bytes']),
         passwordResetEnabled: _bool(j['password_reset_enabled']),
+        groupCallEnabled: _bool(j['group_call_enabled']),
+        groupCallMaxParticipants: _intOrNull(j['group_call_max_participants']),
       );
 }
 
@@ -768,4 +878,136 @@ class MediaInfo {
   const MediaInfo({required this.url, this.mime = '', this.size = 0});
   factory MediaInfo.fromJson(Map<String, dynamic> j) =>
       MediaInfo(url: _str(j['url']), mime: _str(j['mime']), size: _int(j['size']));
+}
+
+// ---------- v0.5.0 多人通话（Cloudflare Realtime SFU，服务端代理，SPEC §3.3） ----------
+
+/// POST /api/calls/group 与 /join 的返回：房间 + 本人在 SFU 的 session + ICE 配置
+class GroupCallJoin {
+  final String callId;
+  final String sessionId;
+  final List<dynamic> iceServers;
+  final List<User> participants;
+
+  const GroupCallJoin({required this.callId, required this.sessionId, this.iceServers = const [], this.participants = const []});
+
+  factory GroupCallJoin.fromJson(Map<String, dynamic> j) => GroupCallJoin(
+        callId: _str(j['call_id']),
+        sessionId: _str(j['session_id']),
+        iceServers: (j['ice_servers'] as List?) ?? const [],
+        participants: ((j['participants'] as List?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(User.fromJson)
+            .toList(),
+      );
+}
+
+/// 一条已发布的 SFU 轨道登记（GET 房间状态与 group_call_tracks 事件共用）
+class GroupTrackInfo {
+  final int userId;
+  final String trackName; // {user_id}/audio | {user_id}/video（服务端分配）
+  final String kind; // audio | video
+  final String mid;
+  final String sessionId;
+
+  const GroupTrackInfo({required this.userId, required this.trackName, this.kind = 'audio', this.mid = '', this.sessionId = ''});
+
+  factory GroupTrackInfo.fromJson(Map<String, dynamic> j) => GroupTrackInfo(
+        userId: _int(j['user_id'] ?? j['owner_id']),
+        trackName: _str(j['track_name'] ?? j['trackName']),
+        kind: _str(j['kind']).isEmpty ? 'audio' : _str(j['kind']),
+        mid: _str(j['mid']),
+        sessionId: _str(j['session_id'] ?? j['sessionId']),
+      );
+
+  Map<String, dynamic> toJson() => {
+        'user_id': userId,
+        'track_name': trackName,
+        'kind': kind,
+        if (mid.isNotEmpty) 'mid': mid,
+        if (sessionId.isNotEmpty) 'session_id': sessionId,
+      };
+
+  /// 本地轨道键（渲染器 / 订阅去重用）
+  String get key => '$userId/$kind';
+}
+
+/// GET /api/calls/group/{call_id} 的房间状态（断线重连恢复用）
+class GroupCallState {
+  final String state; // open | ended
+  final int conversationId;
+  final String kind;
+  final List<User> participants;
+  final List<GroupTrackInfo> tracks;
+
+  const GroupCallState({
+    this.state = '',
+    this.conversationId = 0,
+    this.kind = 'audio',
+    this.participants = const [],
+    this.tracks = const [],
+  });
+
+  bool get isOpen => state.isEmpty || state == 'open';
+
+  factory GroupCallState.fromJson(Map<String, dynamic> j) => GroupCallState(
+        state: _str(j['state']),
+        conversationId: _int(j['conversation_id']),
+        kind: _str(j['kind']).isEmpty ? 'audio' : _str(j['kind']),
+        participants: ((j['participants'] as List?) ?? const [])
+            .whereType<Map<String, dynamic>>()
+            .map(User.fromJson)
+            .toList(),
+        tracks: ((j['tracks'] as List?) ?? const []).whereType<Map<String, dynamic>>().map(GroupTrackInfo.fromJson).toList(),
+      );
+}
+
+/// tracks/publish 与 tracks/subscribe 的返回：Cloudflare 的 sessionDescription
+/// 原样透传（answer 直接 setRemote；offer 需回 answer 走 renegotiate）
+class TracksResult {
+  final Map<String, dynamic>? sessionDescription;
+  final List<Map<String, dynamic>> tracks;
+  final bool requiresImmediateRenegotiation;
+
+  const TracksResult({this.sessionDescription, this.tracks = const [], this.requiresImmediateRenegotiation = false});
+
+  factory TracksResult.fromJson(Map<String, dynamic> j) {
+    final sd = j['sessionDescription'] ?? j['session_description'];
+    return TracksResult(
+      sessionDescription: sd is Map<String, dynamic> ? sd : null,
+      tracks: ((j['tracks'] as List?) ?? const []).whereType<Map<String, dynamic>>().toList(),
+      requiresImmediateRenegotiation: _bool(j['requiresImmediateRenegotiation'] ?? j['requires_immediate_renegotiation']),
+    );
+  }
+
+  String get sdType => sessionDescription?['type']?.toString() ?? '';
+  String get sdp => sessionDescription?['sdp']?.toString() ?? '';
+}
+
+/// 已知 open 房间的轻量登记（会话列表 / 群聊页「通话中」条与邀请横幅用）。
+/// 纯状态模型：成员集合随 group_call_* 事件增减，计数以集合为准。
+class OpenRoom {
+  final String callId;
+  final int conversationId;
+  final String kind; // audio | video
+  final int creatorId;
+  final Set<int> memberIds;
+
+  OpenRoom({required this.callId, required this.conversationId, this.kind = 'audio', this.creatorId = 0, Set<int>? memberIds})
+      : memberIds = memberIds ?? <int>{};
+
+  int get count => memberIds.length;
+
+  void joined(int uid) {
+    if (uid != 0) memberIds.add(uid);
+  }
+
+  void left(int uid) => memberIds.remove(uid);
+
+  /// 用 GET 房间状态的权威成员列表校正
+  void syncMembers(Iterable<int> ids) {
+    memberIds
+      ..clear()
+      ..addAll(ids.where((i) => i != 0));
+  }
 }

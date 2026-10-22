@@ -30,12 +30,15 @@ Future<Uint8List?> _fetchAvatar(String url, String token) {
   });
 }
 
-/// 服务端拼装的相对头像路径（/api/users/{id}/avatar?v=...）需拼服务器 base
+/// 服务端拼装的相对头像路径（/api/users/{id}/avatar?v=...）需拼服务器 base。
+/// 注意：相对路径自带 ?v= 查询串，必须先 parse 把 path 与 query 分开再合并；
+/// 整体塞进 replace(path:) 会把 ? 编码成 %3F，请求变成 /avatar%3Fv=... 而 404。
 String? resolveAvatarUrl(String server, String avatarUrl) {
   if (avatarUrl.isEmpty) return null;
   if (avatarUrl.startsWith('http://') || avatarUrl.startsWith('https://')) return avatarUrl;
   final base = Uri.parse(normalizeServer(server));
-  return base.replace(path: '${base.path}$avatarUrl').toString();
+  final rel = Uri.parse(avatarUrl);
+  return base.replace(path: '${base.path}${rel.path}', query: rel.query.isEmpty ? null : rel.query).toString();
 }
 
 /// 根据用户 ID 选一组 M3 容器色作为头像底色
@@ -52,6 +55,7 @@ class UserAvatar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final store = context.read<ChatStore>();
     final (bg, fg) = avatarColors(Theme.of(context).colorScheme, user?.id ?? 0);
     final fallback = Container(
       width: size,
@@ -59,13 +63,12 @@ class UserAvatar extends StatelessWidget {
       alignment: Alignment.center,
       decoration: BoxDecoration(color: bg, shape: BoxShape.circle),
       child: Text(
-        initialOf(displayName(user)),
+        initialOf(store.displayOf(user)),
         style: TextStyle(color: fg, fontSize: size * 0.42, fontWeight: FontWeight.w500),
       ),
     );
     final url = user?.avatarUrl ?? '';
     if (url.isEmpty) return fallback;
-    final store = context.read<ChatStore>();
     final full = resolveAvatarUrl(store.api.server, url);
     if (full == null) return fallback;
     // 带 Authorization 头拉取（服务端 302 到预签名地址，http 自动跟随重定向）
@@ -102,6 +105,7 @@ class GroupAvatar extends StatelessWidget {
     }
     if (list.length == 1) return UserAvatar(user: list.first, size: size);
     final cell = size / 2;
+    final store = context.read<ChatStore>();
     Widget tile(User u) {
       final (bg, fg) = avatarColors(cs, u.id);
       return Container(
@@ -109,7 +113,7 @@ class GroupAvatar extends StatelessWidget {
         height: cell,
         color: bg,
         alignment: Alignment.center,
-        child: Text(initialOf(displayName(u)), style: TextStyle(color: fg, fontSize: cell * 0.5)),
+        child: Text(initialOf(store.displayOf(u)), style: TextStyle(color: fg, fontSize: cell * 0.5)),
       );
     }
 

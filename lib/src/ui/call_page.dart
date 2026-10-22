@@ -5,7 +5,6 @@ import 'package:provider/provider.dart';
 import '../call.dart';
 import '../recorder.dart' show fmtDuration;
 import '../store.dart';
-import '../util.dart';
 import 'avatar.dart';
 
 /// 通话全屏页（SPEC v0.4.0 §1.5）：来电（头像/昵称/接听拒绝）与通话中
@@ -23,7 +22,7 @@ class CallPage extends StatelessWidget {
       builder: (context, _) {
         if (!calls.active) return const SizedBox.shrink();
         final peer = calls.peer;
-        final name = displayName(peer);
+        final name = store.displayOf(peer);
         final phase = calls.phase;
         final ringing = phase == CallPhase.incoming || phase == CallPhase.outgoing;
         final statusText = switch (phase) {
@@ -71,13 +70,13 @@ class CallPage extends StatelessWidget {
                   Padding(
                     padding: const EdgeInsets.only(bottom: 56),
                     child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                      _CallButton(
+                      CallButton(
                         icon: Icons.call_end,
                         color: Colors.red,
                         label: '拒绝',
                         onTap: calls.reject,
                       ),
-                      _CallButton(
+                      CallButton(
                         icon: calls.isVideo ? Icons.videocam : Icons.call,
                         color: Colors.green,
                         label: '接听',
@@ -91,14 +90,14 @@ class CallPage extends StatelessWidget {
                     Padding(
                       padding: const EdgeInsets.only(bottom: 20),
                       child: Row(mainAxisAlignment: MainAxisAlignment.spaceEvenly, children: [
-                        _CallButton(
+                        CallButton(
                           icon: calls.muted ? Icons.mic_off : Icons.mic,
                           color: calls.muted ? Colors.white : Colors.white24,
                           iconColor: calls.muted ? Colors.black : Colors.white,
                           label: '静音',
                           onTap: calls.toggleMute,
                         ),
-                        _CallButton(
+                        CallButton(
                           icon: calls.speakerOn ? Icons.volume_up : Icons.volume_down,
                           color: calls.speakerOn ? Colors.white : Colors.white24,
                           iconColor: calls.speakerOn ? Colors.black : Colors.white,
@@ -106,13 +105,13 @@ class CallPage extends StatelessWidget {
                           onTap: () => calls.toggleSpeaker(),
                         ),
                         if (calls.isVideo) ...[
-                          _CallButton(
+                          CallButton(
                             icon: Icons.cameraswitch_outlined,
                             color: Colors.white24,
                             label: '切换摄像头',
                             onTap: () => calls.switchCamera(),
                           ),
-                          _CallButton(
+                          CallButton(
                             icon: calls.cameraOff ? Icons.videocam_off : Icons.videocam,
                             color: calls.cameraOff ? Colors.white : Colors.white24,
                             iconColor: calls.cameraOff ? Colors.black : Colors.white,
@@ -124,7 +123,7 @@ class CallPage extends StatelessWidget {
                     ),
                   Padding(
                     padding: const EdgeInsets.only(bottom: 56),
-                    child: _CallButton(
+                    child: CallButton(
                       icon: Icons.call_end,
                       color: Colors.red,
                       label: phase == CallPhase.outgoing ? '取消' : '挂断',
@@ -160,8 +159,10 @@ class CallPage extends StatelessWidget {
   }
 }
 
-class _CallButton extends StatelessWidget {
-  const _CallButton({
+/// 通话控制按钮（1 对 1 与群通话页共用）
+class CallButton extends StatelessWidget {
+  const CallButton({
+    super.key,
     required this.icon,
     required this.color,
     required this.label,

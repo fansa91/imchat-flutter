@@ -1,7 +1,7 @@
 name: imchat
 description: "IMChat - iMessage 风格的即时通讯客户端（Flutter 多平台）"
 publish_to: 'none'
-version: 0.4.0+4
+version: 0.5.0+5
 
 environment:
   sdk: ^3.13.0
@@ -28,6 +28,7 @@ dependencies:
   gal: ^2.3.3
   flutter_webrtc: ^1.6.2+hotfix.4
   video_player: ^2.14.1
+  url_launcher: ^6.3.2
 
 dev_dependencies:
   flutter_test:

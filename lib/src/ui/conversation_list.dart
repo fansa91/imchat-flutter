@@ -31,7 +31,7 @@ class ConversationList extends StatelessWidget {
       appBar: AppBar(
         title: const Text('消息'),
         actions: [
-          IconButton(tooltip: '主题与账号', icon: const Icon(Icons.palette_outlined), onPressed: onSettings),
+          IconButton(tooltip: '我的', icon: const Icon(Icons.person_outline), onPressed: onSettings),
         ],
       ),
       floatingActionButton: FloatingActionButton.extended(
@@ -100,7 +100,7 @@ class _ConvTile extends StatelessWidget {
     final typing = store.typing[c.id]?.active ?? false;
     final last = c.lastMessage;
     String senderName(int id) => store.users[id] != null
-        ? displayName(store.users[id])
+        ? store.displayOf(store.users[id])
         : (id == last?.senderId && c.lastSenderName.isNotEmpty ? c.lastSenderName : '群成员');
     var preview = '开始聊天吧';
     if (typing) {
@@ -117,7 +117,9 @@ class _ConvTile extends StatelessWidget {
       }
     }
     final unread = c.unread > 0;
-    return Padding(
+    // 群里有 open 的群通话：会话项下方挂一条「通话中 · n 人，点击加入」
+    final room = c.isGroup ? store.groupCalls.openRooms[c.id] : null;
+    final tile = Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
       child: ListTile(
         selected: active,
@@ -128,7 +130,7 @@ class _ConvTile extends StatelessWidget {
         title: Row(children: [
           Expanded(
             child: Text(
-              convTitle(c),
+              convTitle(c, store.friendRemarks),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
               style: tt.titleMedium?.copyWith(fontWeight: unread ? FontWeight.w700 : FontWeight.w500),
@@ -164,5 +166,34 @@ class _ConvTile extends StatelessWidget {
         onTap: () => onOpen(c.id),
       ),
     );
+    if (room == null) return tile;
+    return Column(mainAxisSize: MainAxisSize.min, children: [
+      tile,
+      Padding(
+        padding: const EdgeInsets.fromLTRB(20, 0, 20, 4),
+        child: Material(
+          color: cs.primaryContainer,
+          borderRadius: BorderRadius.circular(12),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () => store.groupCalls.joinOpenRoom(c.id),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 7),
+              child: Row(children: [
+                Icon(room.kind == 'video' ? Icons.videocam : Icons.call, size: 16, color: cs.onPrimaryContainer),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '通话中 · ${room.count} 人，点击加入',
+                    style: tt.bodySmall?.copyWith(color: cs.onPrimaryContainer, fontWeight: FontWeight.w600),
+                  ),
+                ),
+                Icon(Icons.login, size: 16, color: cs.onPrimaryContainer),
+              ]),
+            ),
+          ),
+        ),
+      ),
+    ]);
   }
 }

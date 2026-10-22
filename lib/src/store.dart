@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'api.dart';
 import 'call.dart';
 import 'file_cache.dart';
+import 'group_call.dart';
 import 'image_cache.dart';
 import 'image_prep.dart';
 import 'models.dart';
@@ -70,7 +71,10 @@ class ChatStore extends ChangeNotifier {
       conn = s;
       _notify();
     };
-    socket.onOpen = _sync;
+    socket.onOpen = () {
+      _sync();
+      groupCalls.onReconnect();
+    };
     socket.on('send_ack', (d, _) => _onAck(Message.fromJson(_m(d)['message'])));
     socket.on('message', (d, _) => _onMessage(Message.fromJson(_m(d)['message'])));
     socket.on('read', (d, _) {
@@ -104,6 +108,36 @@ class ChatStore extends ChangeNotifier {
       final u = _m(d)['user'];
       if (u is Map<String, dynamic>) _onUserUpdated(User.fromJson(u));
     });
+    // v0.5.0：好友事件（申请到达刷新红点；接受/拒绝/删除刷新列表）
+    socket.on('friend_request', (d, _) {
+      loadFriendRequests().catchError((_) {});
+      showToast('收到新的好友申请');
+    });
+    socket.on('friend_request_accepted', (d, _) {
+      final by = _m(d)['by'];
+      final name = by is Map<String, dynamic> ? displayName(User.fromJson(by)) : '';
+      loadFriends().catchError((_) {});
+      loadFriendRequests().catchError((_) {});
+      if (name.isNotEmpty) showToast('$name 已接受你的好友申请');
+    });
+    socket.on('friend_request_rejected', (d, _) {
+      loadFriendRequests().catchError((_) {});
+    });
+    socket.on('friend_removed', (d, _) {
+      // 对方删了我：静默刷新好友列表，不弹提示（SPEC §1.3）
+      loadFriends().catchError((_) {});
+    });
+    // v0.5.0：群通话事件全部转发给 GroupCallManager
+    for (final t in [
+      'group_call_started',
+      'group_call_joined',
+      'group_call_tracks',
+      'group_call_tracks_closed',
+      'group_call_left',
+      'group_call_ended',
+    ]) {
+      socket.on(t, (d, _) => groupCalls.handleEvent(t, _m(d)));
+    }
     socket.on('session_revoked', (d, _) async {
       // 若是本设备刚改完密码：本地已换上新 token，校验通过则不登出，
       // 等 socket 用新 token 重连即可（其他设备已被踢）。
@@ -136,6 +170,19 @@ class ChatStore extends ChangeNotifier {
 
   /// v0.4.0 通话管理（信令经本 store 的 socket 转发进来）
   late final CallManager calls = CallManager(this);
+
+  /// v0.5.0 多人通话管理（事件经本 store 的 socket 转发进来）
+  late final GroupCallManager groupCalls = GroupCallManager(this);
+
+  /// v0.5.0 好友列表与申请（incoming 待处理数即「新的朋友」红点）
+  List<Friend> friends = [];
+  List<FriendRequest> friendRequestsIn = [];
+  List<FriendRequest> friendRequestsOut = [];
+
+  /// userId -> 我给对方的备注（显示名规则的数据源，SPEC §1.4）
+  final Map<int, String> friendRemarks = {};
+
+  int get pendingFriendCount => friendRequestsIn.length;
   VoiceCache? _cache;
   ImageFileCache? _imgCache;
   MediaFileCache? _fileCache;
@@ -206,6 +253,12 @@ class ChatStore extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// 供子管理器（通话）在其附属状态变化时触发界面刷新
+  void ping() => _notify();
+
+  /// 显示名（备注优先规则的全局入口，SPEC v0.5.0 §1.4）
+  String displayOf(User? u) => friendDisplayName(u, friendRemarks[u?.id] ?? '');
+
   @override
   void dispose() {
     _disposed = true;
@@ -266,6 +319,8 @@ class ChatStore extends ChangeNotifier {
       refreshPresence();
     }).catchError((_) {});
     loadConversations().catchError((_) => <Conversation>[]);
+    loadFriends().catchError((_) {});
+    loadFriendRequests().catchError((_) {});
   }
 
   Future<void> login(String email, String password, {bool register = false, String nickname = ''}) async {
@@ -292,6 +347,11 @@ class ChatStore extends ChangeNotifier {
     _localMedia.clear();
     uploadProgress.clear();
     calls.forceEnd();
+    groupCalls.forceEnd();
+    friends = [];
+    friendRequestsIn = [];
+    friendRequestsOut = [];
+    friendRemarks.clear();
     _downloadQueue.clear();
     me = null;
     conn = ConnState.offline;
@@ -1280,7 +1340,8 @@ class ChatStore extends ChangeNotifier {
   void _onUserUpdated(User u) {
     if (u.id == 0) return;
     users[u.id] = u;
-    if (u.id == me?.id) me = u;
+    // user_updated 是他人视角结构（不含 allow_find），更新本人时保留原隐私开关值
+    if (u.id == me?.id) me = u.copyWith(allowFind: me!.allowFind);
     for (final id in convs.keys.toList()) {
       final c = convs[id]!;
       var next = c;
@@ -1318,6 +1379,161 @@ class ChatStore extends ChangeNotifier {
   }
 
   Future<void> forgotPassword(String email) => api.forgotPassword(email.trim());
+
+  /// 隐私开关：允许通过邮箱 / 用户 ID 找到我（SPEC v0.5.0 §2）
+  Future<void> updateAllowFind(bool v) async {
+    final u = await api.patchMe(allowFind: v);
+    me = u;
+    users[u.id] = u;
+    _notify();
+  }
+
+  /// 退出其他设备：服务端吊销其他登录态并给本设备换发新 token，无感续用
+  Future<void> revokeOtherSessions() async {
+    final token = await api.revokeOtherSessions();
+    if (token.isEmpty) throw ApiError(0, 'revoke', '服务器未返回新令牌');
+    await settings.setToken(token);
+    api.token = token;
+    showToast('已退出其他设备的登录');
+    _notify();
+  }
+
+  // ---------- 好友（v0.5.0） ----------
+
+  Future<void> loadFriends() async {
+    final list = await api.friends();
+    friends = list;
+    friendRemarks
+      ..clear()
+      ..addEntries(list.where((f) => f.remark.isNotEmpty).map((f) => MapEntry(f.user.id, f.remark)));
+    _addUsers(list.map((f) => f.user));
+    _notify();
+  }
+
+  Future<void> loadFriendRequests() async {
+    final (inc, out) = await api.friendRequests();
+    friendRequestsIn = inc;
+    friendRequestsOut = out;
+    _addUsers([...inc.map((r) => r.user), ...out.map((r) => r.user)]);
+    _notify();
+  }
+
+  /// 搜索用户（邮箱或用户 ID），结果带关系状态
+  Future<SearchResult> searchUsers({String? email, int? id}) async {
+    final r = await api.search(email: email?.trim().toLowerCase(), id: id);
+    _addUsers([r.user]);
+    return r;
+  }
+
+  /// 发送好友申请；返回服务端状态（pending / accepted=反向申请直接成友）
+  Future<String> sendFriendRequest(int userId, String message) async {
+    final (_, status) = await api.sendFriendRequest(userId, message.trim());
+    if (status == 'accepted') {
+      await loadFriends();
+    }
+    await loadFriendRequests();
+    return status;
+  }
+
+  Future<void> acceptFriendRequest(int requestId) async {
+    await api.acceptFriendRequest(requestId);
+    await loadFriends();
+    await loadFriendRequests();
+  }
+
+  Future<void> rejectFriendRequest(int requestId) async {
+    await api.rejectFriendRequest(requestId);
+    await loadFriendRequests();
+  }
+
+  Future<void> cancelFriendRequest(int requestId) async {
+    await api.cancelFriendRequest(requestId);
+    await loadFriendRequests();
+  }
+
+  /// 设置 / 清除备注（本地立即生效，再同步服务端）
+  Future<void> setFriendRemark(int userId, String remark) async {
+    final r = remark.trim();
+    await api.patchFriend(userId, r);
+    final i = friends.indexWhere((f) => f.user.id == userId);
+    if (i >= 0) friends[i] = friends[i].copyWith(remark: r);
+    if (r.isEmpty) {
+      friendRemarks.remove(userId);
+    } else {
+      friendRemarks[userId] = r;
+    }
+    _notify();
+  }
+
+  /// 删除好友：会话与聊天记录保留（SPEC §1.1）
+  Future<void> removeFriend(int userId) async {
+    await api.deleteFriend(userId);
+    friends = friends.where((f) => f.user.id != userId).toList();
+    friendRemarks.remove(userId);
+    _notify();
+  }
+
+  Friend? friendOf(int userId) => friends.where((f) => f.user.id == userId).firstOrNull;
+
+  /// 与指定用户打开（或新建）单聊，返回会话 ID
+  Future<int> startChatWithUser(int userId) async {
+    final cid = await api.openDirect(userId);
+    if (!convs.containsKey(cid)) {
+      await loadConversations();
+      if (!convs.containsKey(cid)) {
+        final u = users[userId];
+        if (u != null) {
+          convs[cid] = Conversation(id: cid, type: convDirect, updatedAt: DateTime.now(), peer: u);
+          _notify();
+        }
+      }
+    }
+    return cid;
+  }
+
+  // ---------- 本地缓存（「我的」页存储分区） ----------
+
+  Future<Directory> _cacheRoot() async {
+    final docs = await getApplicationDocumentsDirectory();
+    return Directory(pathlib.join(docs.path, 'IMChat'));
+  }
+
+  /// 全部媒体缓存（语音/图片/文件/视频）占用字节数
+  Future<int> cacheBytes() async {
+    try {
+      final root = await _cacheRoot();
+      if (!await root.exists()) return 0;
+      var total = 0;
+      await for (final e in root.list(recursive: true, followLinks: false)) {
+        if (e is File) total += await e.length();
+      }
+      return total;
+    } catch (_) {
+      return 0;
+    }
+  }
+
+  /// 清理全部媒体缓存文件（保留目录结构，缓存对象可继续使用）；
+  /// 内存中的就绪状态一并清掉，后续访问会重新下载
+  Future<void> clearCaches() async {
+    try {
+      final root = await _cacheRoot();
+      if (await root.exists()) {
+        await for (final e in root.list(recursive: true, followLinks: false)) {
+          if (e is File) {
+            try {
+              await e.delete();
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
+    _localVoice.clear();
+    _localImage.clear();
+    voice.clear();
+    images.clear();
+    _notify();
+  }
 
   /// 撤回 / 删除：清理语音、图片、转写结果的本地副本
   void _forgetMedia(int cid, int seq) {
@@ -1434,6 +1650,7 @@ class ChatStore extends ChangeNotifier {
       for (final list in members.values) {
         all.addAll(list.map((m) => m.user.id));
       }
+      all.addAll(friends.map((f) => f.user.id));
     }
     all.removeWhere((u) => u == 0 || u == me?.id);
     final list = all.toList();
@@ -1505,5 +1722,5 @@ class ChatStore extends ChangeNotifier {
 
   // ---------- 视图辅助 ----------
 
-  String nameOf(int uid) => uid == me?.id ? '你' : (users[uid] != null ? displayName(users[uid]) : '群成员');
+  String nameOf(int uid) => uid == me?.id ? '你' : (users[uid] != null ? displayOf(users[uid]) : '群成员');
 }

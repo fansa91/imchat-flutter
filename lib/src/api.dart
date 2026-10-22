@@ -209,15 +209,95 @@ class Api {
   /// 通话 ICE 配置：服务端透传 Cloudflare 的 iceServers，不落盘
   Future<Map<String, dynamic>> iceServers() async => _map(await _req('GET', '/api/calls/ice-servers'));
 
-  Future<User> patchMe({String? nickname, String? avatarKey}) async =>
+  Future<User> patchMe({String? nickname, String? avatarKey, bool? allowFind}) async =>
       User.fromJson(_map(await _req('PATCH', '/api/me', body: {
         'nickname': ?nickname,
         'avatar_key': ?avatarKey,
+        'allow_find': ?allowFind,
       })));
 
   /// 修改密码：成功后返回新 token（当前设备无感续用，其他设备被踢）
   Future<AuthResult> changePassword(String oldPassword, String newPassword) async => AuthResult.fromJson(
       _map(await _req('POST', '/api/me/password', body: {'old_password': oldPassword, 'new_password': newPassword})));
+
+  // v0.5.0 好友系统（SPEC §1.3）
+
+  /// 搜索用户：邮箱或用户 ID 二选一，返回 PublicUser + 关系状态；
+  /// 目标不存在或对方关闭了「允许找到我」时抛 404 not_found
+  Future<SearchResult> search({String? email, int? id}) async {
+    final q = <String, String>{};
+    if (email != null && email.isNotEmpty) q['email'] = email;
+    if (id != null && id > 0) q['id'] = '$id';
+    return SearchResult.fromJson(_map(await _req('GET', '/api/users/search', query: q)));
+  }
+
+  Future<List<Friend>> friends() async => _list(await _req('GET', '/api/friends'))
+      .whereType<Map<String, dynamic>>()
+      .map(Friend.fromJson)
+      .toList();
+
+  Future<(List<FriendRequest>, List<FriendRequest>)> friendRequests() async {
+    final m = _map(await _req('GET', '/api/friends/requests'));
+    List<FriendRequest> parse(dynamic v) =>
+        (v as List? ?? const []).whereType<Map<String, dynamic>>().map(FriendRequest.fromJson).toList();
+    return (parse(m['incoming']), parse(m['outgoing']));
+  }
+
+  /// 发送好友申请；反向已有待处理申请时服务端直接成友，status 返回 accepted
+  Future<(int, String)> sendFriendRequest(int userId, String message) async {
+    final m = _map(await _req('POST', '/api/friends/requests', body: {'user_id': userId, 'message': message}));
+    return ((m['id'] as num?)?.toInt() ?? 0, (m['status'] ?? 'pending').toString());
+  }
+
+  Future<void> acceptFriendRequest(int id) => _req('POST', '/api/friends/requests/$id/accept');
+
+  Future<void> rejectFriendRequest(int id) => _req('POST', '/api/friends/requests/$id/reject');
+
+  /// 撤回自己发出的待处理申请
+  Future<void> cancelFriendRequest(int id) => _req('DELETE', '/api/friends/requests/$id');
+
+  /// 设置 / 清除给好友的备注（空串清除）；不是好友时抛 404 not_friends
+  Future<void> patchFriend(int userId, String remark) =>
+      _req('PATCH', '/api/friends/$userId', body: {'remark': remark});
+
+  /// 删除好友（双边）；不删会话与消息记录
+  Future<void> deleteFriend(int userId) => _req('DELETE', '/api/friends/$userId');
+
+  /// 退出其他设备：token_version +1，返回当前设备的新 token（SPEC §2.1）
+  Future<String> revokeOtherSessions() async =>
+      (_map(await _req('POST', '/api/me/revoke-other-sessions'))['token'] ?? '').toString();
+
+  // v0.5.0 多人通话：服务端代理 Cloudflare SFU（SPEC §3.3），App Secret 不下发
+
+  Future<GroupCallJoin> createGroupCall(int conversationId, String kind) async => GroupCallJoin.fromJson(
+      _map(await _req('POST', '/api/calls/group', body: {'conversation_id': conversationId, 'kind': kind})));
+
+  Future<GroupCallJoin> joinGroupCall(String callId) async =>
+      GroupCallJoin.fromJson(_map(await _req('POST', '/api/calls/group/$callId/join')));
+
+  Future<GroupCallState> groupCallState(String callId) async =>
+      GroupCallState.fromJson(_map(await _req('GET', '/api/calls/group/$callId')));
+
+  Future<TracksResult> publishTracks(
+          String callId, Map<String, dynamic> sessionDescription, List<Map<String, dynamic>> tracks) async =>
+      TracksResult.fromJson(_map(await _req('POST', '/api/calls/group/$callId/tracks/publish',
+          body: {'session_description': sessionDescription, 'tracks': tracks},
+          timeout: const Duration(seconds: 30))));
+
+  Future<TracksResult> subscribeTracks(String callId, List<Map<String, dynamic>> tracks,
+          {Map<String, dynamic>? sessionDescription}) async =>
+      TracksResult.fromJson(_map(await _req('POST', '/api/calls/group/$callId/tracks/subscribe',
+          body: {'tracks': tracks, 'session_description': ?sessionDescription},
+          timeout: const Duration(seconds: 30))));
+
+  Future<void> renegotiateGroupCall(String callId, Map<String, dynamic> sessionDescription) =>
+      _req('POST', '/api/calls/group/$callId/renegotiate',
+          body: {'session_description': sessionDescription}, timeout: const Duration(seconds: 30));
+
+  Future<void> closeGroupTracks(String callId, List<String> kinds) =>
+      _req('POST', '/api/calls/group/$callId/tracks/close', body: {'kinds': kinds});
+
+  Future<void> leaveGroupCall(String callId) => _req('POST', '/api/calls/group/$callId/leave');
 
   /// 忘记密码：无需登录。服务端未启用时抛 ApiError(code: reset_disabled, 501)
   Future<void> forgotPassword(String email) async {

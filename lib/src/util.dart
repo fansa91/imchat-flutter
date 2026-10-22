@@ -31,16 +31,25 @@ String displayName(User? u) {
   return '未知用户';
 }
 
+/// 好友显示名规则（SPEC v0.5.0 §1.4，全局统一）：本人给对方设置的备注
+/// 非空时用备注，否则用昵称规则。会话列表、群成员、通话界面都走这里。
+String friendDisplayName(User? u, String remark) {
+  final r = remark.trim();
+  if (u != null && r.isNotEmpty) return r;
+  return displayName(u);
+}
+
 String initialOf(String name) {
   final t = name.trim();
   if (t.isEmpty) return '?';
   return String.fromCharCode(t.runes.first).toUpperCase();
 }
 
-String convTitle(Conversation? c) {
+/// 会话标题；单聊对方是好友时走备注规则（remarks 为 userId -> 备注）
+String convTitle(Conversation? c, [Map<int, String> remarks = const {}]) {
   if (c == null) return '';
   if (c.isGroup) return c.name.isNotEmpty ? c.name : '群聊';
-  return displayName(c.peer);
+  return friendDisplayName(c.peer, remarks[c.peer?.id] ?? '');
 }
 
 /// 系统消息文本：把自己替换成“你”
@@ -86,11 +95,19 @@ String fmtCallDuration(int ms) {
   return s >= 3600 ? '${s ~/ 3600}:${two(mm)}:${two(ss)}' : '${two(mm)}:${two(ss)}';
 }
 
-/// 通话记录的展示文案（SPEC v0.4.0 §1.4），解析失败时兜底
+/// 通话记录的展示文案（SPEC v0.4.0 §1.4 / v0.5.0 §3.5），解析失败时兜底
 String callText(Message m) {
   final c = CallContent.of(m);
   if (c == null) return '[通话]';
-  final kind = c.isVideo ? '视频通话' : '语音通话';
+  final kind = '${c.isGroup ? '群' : ''}${c.isVideo ? '视频通话' : '语音通话'}';
+  if (c.isGroup) {
+    return switch (c.outcome) {
+      'completed' => '$kind ${fmtCallDuration(c.durationMs)} · ${c.joinedCount} 人参与',
+      'missed' => '$kind 无人加入',
+      'failed' => '$kind 连接失败',
+      _ => '[$kind]',
+    };
+  }
   return switch (c.outcome) {
     'completed' => '$kind ${fmtCallDuration(c.durationMs)}',
     'missed' => '$kind 未接听',
@@ -115,7 +132,10 @@ String previewOf(Message m, int? meId, String Function(int id) senderName) {
     final name = f?.name ?? '';
     return name.isEmpty ? '[文件]' : '[文件] $name';
   }
-  if (m.msgType == msgCall) return '[${CallContent.of(m)?.isVideo == true ? '视频通话' : '语音通话'}]';
+  if (m.msgType == msgCall) {
+    final cc = CallContent.of(m);
+    return '[${cc?.isGroup == true ? '群' : ''}${cc?.isVideo == true ? '视频通话' : '语音通话'}]';
+  }
   return unsupportedText;
 }
 
