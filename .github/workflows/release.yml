@@ -195,12 +195,27 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
       - run: ls -la dist
+      - name: 摘录更新说明（CHANGELOG.md 中与 tag 同名的小节）
+        run: |
+          awk -v tag="${{ github.ref_name }}" '
+            BEGIN { h = "## " tag }
+            index($0, h) == 1 && (length($0) == length(h) || substr($0, length(h) + 1, 1) ~ /[[:space:]-]/) { insec = 1; next }
+            insec && /^## / { exit }
+            insec { print }
+          ' CHANGELOG.md > release-notes.md
+          sed -i -e :a -e '/^\n*$/{$d;N;ba}' -e 's/^\n\+//' release-notes.md || true
+          if [ ! -s release-notes.md ]; then
+            echo "（本版本暂无更新说明）" > release-notes.md
+          fi
+          cat release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
           files: dist/*
+          body_path: release-notes.md
           generate_release_notes: true
