@@ -891,15 +891,26 @@ class GroupCallJoin {
 
   const GroupCallJoin({required this.callId, required this.sessionId, this.iceServers = const [], this.participants = const []});
 
-  factory GroupCallJoin.fromJson(Map<String, dynamic> j) => GroupCallJoin(
-        callId: _str(j['call_id']),
-        sessionId: _str(j['session_id']),
-        iceServers: (j['ice_servers'] as List?) ?? const [],
-        participants: ((j['participants'] as List?) ?? const [])
-            .whereType<Map<String, dynamic>>()
-            .map(User.fromJson)
-            .toList(),
-      );
+  factory GroupCallJoin.fromJson(Map<String, dynamic> j) {
+    // 服务端把 TURN 接口的原始回应（{iceServers: [...], expires_at} 对象）
+    // 原样嵌在 ice_servers 里，不是数组——按对象取内层列表（与 1 对 1
+    // iceServers() 的解析口径一致）；防御性兼容直接给数组的形状。
+    final rawIce = j['ice_servers'];
+    final List<dynamic> ice = switch (rawIce) {
+      Map<String, dynamic> m => (m['iceServers'] ?? m['ice_servers']) as List? ?? const [],
+      List l => l,
+      _ => const [],
+    };
+    return GroupCallJoin(
+      callId: _str(j['call_id']),
+      sessionId: _str(j['session_id']),
+      iceServers: ice,
+      participants: ((j['participants'] as List?) ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(User.fromJson)
+          .toList(),
+    );
+  }
 }
 
 /// 一条已发布的 SFU 轨道登记（GET 房间状态与 group_call_tracks 事件共用）

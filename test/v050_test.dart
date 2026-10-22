@@ -273,16 +273,35 @@ void main() {
   });
 
   group('GroupCallJoin.fromJson', () {
-    test('parse join response', () {
+    // 服务端真实形状：ice_servers 是 TURN 原始回应对象 {iceServers: [...]}
+    // （imserver respondRoom 原样嵌入）。早期测试误写成数组形状，掩盖了
+    // 线上强转 List 抛错导致 Flutter 无法发起/加入群通话的 bug（v0.5.1 修）。
+    test('parse join response (real server shape)', () {
       final j = jsonDecode('''{
         "call_id":"c1","session_id":"sess1",
-        "ice_servers":[{"urls":["stun:stun.cloudflare.com:3478"]}],
+        "ice_servers":{"iceServers":[{"urls":["stun:stun.cloudflare.com:3478"]},
+          {"urls":["turn:turn.cloudflare.com:3478?transport=udp"],"username":"u","credential":"c"}],
+          "expires_at":"2026-10-22T13:00:00Z"},
         "participants":[{"id":7,"nickname":"我"}]}''') as Map<String, dynamic>;
       final join = GroupCallJoin.fromJson(j);
       expect(join.callId, 'c1');
       expect(join.sessionId, 'sess1');
-      expect(join.iceServers.length, 1);
+      expect(join.iceServers.length, 2);
+      expect((join.iceServers[1] as Map)['username'], 'u');
       expect(join.participants.single.id, 7);
+    });
+
+    test('bare list shape still parses (defensive)', () {
+      final j = jsonDecode('''{
+        "call_id":"c2","session_id":"sess2",
+        "ice_servers":[{"urls":["stun:stun.cloudflare.com:3478"]}],
+        "participants":[]}''') as Map<String, dynamic>;
+      expect(GroupCallJoin.fromJson(j).iceServers.length, 1);
+    });
+
+    test('missing ice_servers parses empty', () {
+      final j = jsonDecode('{"call_id":"c3","session_id":"sess3"}') as Map<String, dynamic>;
+      expect(GroupCallJoin.fromJson(j).iceServers, isEmpty);
     });
   });
 }
